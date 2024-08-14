@@ -22,9 +22,10 @@ public class PostgresTestResourceLifecycleManager implements QuarkusTestResource
     public static final String POSTGRES_USER = "postgres";
     public static final String POSTGRES_PASSWORD = "postgres";
     public static final String POSTGRES_DBNAME = "postgres";
-    public static final String POSTGRES_IMAGE = "debezium/example-postgres";
+    public static final String POSTGRES_IMAGE = "quay.io/debezium/example-postgres";
     public static final String POSTGRES_HOST = "localhost";
     public static final Integer POSTGRES_PORT = 5432;
+    public static final String JDBC_POSTGRESQL_URL_FORMAT = "jdbc:postgresql://%s:%s/";
 
     private static final GenericContainer<?> container = new GenericContainer<>(POSTGRES_IMAGE)
             .waitingFor(Wait.forLogMessage(".*database system is ready to accept connections.*", 2))

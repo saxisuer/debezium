@@ -25,6 +25,8 @@ import org.apache.kafka.connect.errors.ConnectException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.debezium.connector.postgresql.PostgresValueConverter;
+
 /**
  * Transformer for time/date related string representations in replication messages.
  *
@@ -32,23 +34,23 @@ import org.slf4j.LoggerFactory;
  *
  */
 public interface DateTimeFormat {
-    public Instant timestampToInstant(final String s);
+    Instant timestampToInstant(String s);
 
-    public OffsetDateTime timestampWithTimeZoneToOffsetDateTime(final String s);
+    OffsetDateTime timestampWithTimeZoneToOffsetDateTime(String s);
 
-    public Instant systemTimestampToInstant(final String s);
+    Instant systemTimestampToInstant(String s);
 
-    public LocalDate date(final String s);
+    LocalDate date(String s);
 
-    public LocalTime time(final String s);
+    LocalTime time(String s);
 
-    public OffsetTime timeWithTimeZone(final String s);
+    OffsetTime timeWithTimeZone(String s);
 
-    public static DateTimeFormat get() {
+    static DateTimeFormat get() {
         return new ISODateTimeFormat();
     }
 
-    public static class ISODateTimeFormat implements DateTimeFormat {
+    class ISODateTimeFormat implements DateTimeFormat {
         private static final Logger LOGGER = LoggerFactory.getLogger(ISODateTimeFormat.class);
 
         // This formatter is similar to standard Java's ISO_LOCAL_DATE. But this one is
@@ -132,7 +134,17 @@ public interface DateTimeFormat {
 
         @Override
         public LocalDate date(final String s) {
-            return format(DATE_FORMAT_OPT_ERA_PATTERN_HINT, s, () -> LocalDate.parse(s, DATE_FORMAT_OPT_ERA));
+            return format(DATE_FORMAT_OPT_ERA_PATTERN_HINT, s, () -> {
+                if ("infinity".equals(s)) {
+                    return PostgresValueConverter.POSITIVE_INFINITY_LOCAL_DATE;
+                }
+                else if ("-infinity".equals(s)) {
+                    return PostgresValueConverter.NEGATIVE_INFINITY_LOCAL_DATE;
+                }
+                else {
+                    return LocalDate.parse(s, DATE_FORMAT_OPT_ERA);
+                }
+            });
         }
 
         @Override

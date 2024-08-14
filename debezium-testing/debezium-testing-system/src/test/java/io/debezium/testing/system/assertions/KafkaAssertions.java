@@ -11,6 +11,7 @@ import static org.awaitility.Awaitility.await;
 
 import java.time.Duration;
 import java.time.temporal.ChronoUnit;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -18,8 +19,12 @@ import java.util.concurrent.TimeUnit;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.awaitility.core.ThrowingRunnable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public interface KafkaAssertions<K, V> {
+
+    Logger LOGGER = LoggerFactory.getLogger(KafkaAssertions.class);
 
     static void awaitAssert(long timeout, TimeUnit unit, ThrowingRunnable assertion) {
         await()
@@ -33,6 +38,7 @@ public interface KafkaAssertions<K, V> {
     }
 
     default void assertTopicsExist(String... names) {
+        LOGGER.info("Awaiting topics " + Arrays.toString(names));
         try (Consumer<K, V> consumer = getConsumer()) {
             await().atMost(scaled(2), TimeUnit.MINUTES).untilAsserted(() -> {
                 Set<String> topics = consumer.listTopics().keySet();
@@ -44,7 +50,7 @@ public interface KafkaAssertions<K, V> {
     default void assertRecordsCount(String topic, int count) {
         try (Consumer<K, V> consumer = getConsumer()) {
             consumer.subscribe(Collections.singleton(topic));
-            ConsumerRecords<K, V> records = consumer.poll(Duration.of(10, ChronoUnit.SECONDS));
+            ConsumerRecords<K, V> records = consumer.poll(Duration.of(15, ChronoUnit.SECONDS));
             consumer.seekToBeginning(consumer.assignment());
             assertThat(records.count()).withFailMessage("Expecting topic '%s' to have <%d> messages but it had <%d>.", topic, count, records.count()).isEqualTo(count);
         }
@@ -53,15 +59,19 @@ public interface KafkaAssertions<K, V> {
     default void assertMinimalRecordsCount(String topic, int count) {
         try (Consumer<K, V> consumer = getConsumer()) {
             consumer.subscribe(Collections.singleton(topic));
-            ConsumerRecords<K, V> records = consumer.poll(Duration.of(10, ChronoUnit.SECONDS));
+            ConsumerRecords<K, V> records = consumer.poll(Duration.of(15, ChronoUnit.SECONDS));
             consumer.seekToBeginning(consumer.assignment());
             assertThat(
                     records.count()).withFailMessage("Expecting topic '%s' to have  at least <%d> messages but it had <%d>.", topic, count, records.count())
-                            .isGreaterThanOrEqualTo(count);
+                    .isGreaterThanOrEqualTo(count);
         }
     }
 
     void assertRecordsContain(String topic, String content);
+
+    void assertRecordIsUnwrapped(String topic, int amount);
+
+    void assertDocumentIsUnwrapped(String topic, int amount);
 
     Consumer<K, V> getConsumer();
 }

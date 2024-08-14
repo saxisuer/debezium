@@ -5,23 +5,19 @@
  */
 package io.debezium.metrics;
 
-import java.lang.management.ManagementFactory;
 import java.util.Map;
 import java.util.stream.Collectors;
 
-import javax.management.JMException;
-import javax.management.MBeanServer;
 import javax.management.MalformedObjectNameException;
 import javax.management.ObjectName;
 
 import org.apache.kafka.common.utils.Sanitizer;
 import org.apache.kafka.connect.errors.ConnectException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import io.debezium.annotation.ThreadSafe;
 import io.debezium.config.CommonConnectorConfig;
 import io.debezium.connector.common.CdcSourceTaskContext;
+import io.debezium.pipeline.JmxUtils;
 import io.debezium.util.Collect;
 
 /**
@@ -32,16 +28,15 @@ import io.debezium.util.Collect;
 @ThreadSafe
 public abstract class Metrics {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(Metrics.class);
-
     private final ObjectName name;
     private volatile boolean registered = false;
 
     protected Metrics(CdcSourceTaskContext taskContext, String contextName) {
-        this.name = metricName(taskContext.getConnectorType(), taskContext.getConnectorName(), contextName);
+        this.name = metricName(taskContext.getConnectorType(), taskContext.getConnectorName(), contextName, taskContext.getCustomMetricTags());
     }
 
     protected Metrics(CdcSourceTaskContext taskContext, Map<String, String> tags) {
+        tags.putAll(taskContext.getCustomMetricTags());
         this.name = metricName(taskContext.getConnectorType(), tags);
     }
 
@@ -49,13 +44,15 @@ public abstract class Metrics {
         String connectorType = connectorConfig.getContextName();
         String connectorName = connectorConfig.getLogicalName();
         if (multiPartitionMode) {
-            this.name = metricName(connectorType, Collect.linkMapOf(
+            Map<String, String> tags = Collect.linkMapOf(
                     "server", connectorName,
                     "task", connectorConfig.getTaskId(),
-                    "context", contextName));
+                    "context", contextName);
+            tags.putAll(connectorConfig.getCustomMetricTags());
+            this.name = metricName(connectorType, tags);
         }
         else {
-            this.name = metricName(connectorType, connectorName, contextName);
+            this.name = metricName(connectorType, connectorName, contextName, connectorConfig.getCustomMetricTags());
         }
     }
 
@@ -64,18 +61,11 @@ public abstract class Metrics {
      * The method is intentionally synchronized to prevent preemption between registration and unregistration.
      */
     public synchronized void register() {
-        try {
-            final MBeanServer mBeanServer = ManagementFactory.getPlatformMBeanServer();
-            if (mBeanServer == null) {
-                LOGGER.info("JMX not supported, bean '{}' not registered", name);
-                return;
-            }
-            mBeanServer.registerMBean(this, name);
-            registered = true;
-        }
-        catch (JMException e) {
-            throw new RuntimeException("Unable to register the MBean '" + name + "'", e);
-        }
+
+        JmxUtils.registerMXBean(name, this);
+        // If the old metrics MBean is present then the connector will try to unregister it
+        // upon shutdown.
+        registered = true;
     }
 
     /**
@@ -84,23 +74,15 @@ public abstract class Metrics {
      */
     public synchronized void unregister() {
         if (this.name != null && registered) {
-            try {
-                final MBeanServer mBeanServer = ManagementFactory.getPlatformMBeanServer();
-                if (mBeanServer == null) {
-                    LOGGER.debug("JMX not supported, bean '{}' not registered", name);
-                    return;
-                }
-                mBeanServer.unregisterMBean(name);
-                registered = false;
-            }
-            catch (JMException e) {
-                throw new RuntimeException("Unable to unregister the MBean '" + name + "'", e);
-            }
+            JmxUtils.unregisterMXBean(name);
+            registered = false;
         }
     }
 
-    protected ObjectName metricName(String connectorType, String connectorName, String contextName) {
-        return metricName(connectorType, Collect.linkMapOf("context", contextName, "server", connectorName));
+    protected ObjectName metricName(String connectorType, String connectorName, String contextName, Map<String, String> customTags) {
+        Map<String, String> tags = Collect.linkMapOf("context", contextName, "server", connectorName);
+        tags.putAll(customTags);
+        return metricName(connectorType, tags);
     }
 
     /**

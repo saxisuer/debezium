@@ -6,14 +6,8 @@
 package io.debezium.connector.oracle.logminer.processor.memory;
 
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import io.debezium.connector.oracle.Scn;
-import io.debezium.connector.oracle.logminer.events.LogMinerEvent;
 import io.debezium.connector.oracle.logminer.processor.AbstractTransaction;
 
 /**
@@ -23,14 +17,10 @@ import io.debezium.connector.oracle.logminer.processor.AbstractTransaction;
  */
 public class MemoryTransaction extends AbstractTransaction {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(MemoryTransaction.class);
-
     private int numberOfEvents;
-    private List<LogMinerEvent> events;
 
-    public MemoryTransaction(String transactionId, Scn startScn, Instant changeTime, String userName) {
-        super(transactionId, startScn, changeTime, userName);
-        this.events = new ArrayList<>();
+    public MemoryTransaction(String transactionId, Scn startScn, Instant changeTime, String userName, Integer redoThreadId) {
+        super(transactionId, startScn, changeTime, userName, redoThreadId);
         start();
     }
 
@@ -47,20 +37,6 @@ public class MemoryTransaction extends AbstractTransaction {
     @Override
     public void start() {
         numberOfEvents = 0;
-    }
-
-    public List<LogMinerEvent> getEvents() {
-        return events;
-    }
-
-    public void removeEventWithRowId(String rowId) {
-        events.removeIf(event -> {
-            if (event.getRowId().equals(rowId)) {
-                LOGGER.trace("Undo applied for event {}.", event);
-                return true;
-            }
-            return false;
-        });
     }
 
     @Override

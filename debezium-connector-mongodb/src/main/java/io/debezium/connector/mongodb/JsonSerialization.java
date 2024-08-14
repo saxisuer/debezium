@@ -8,24 +8,20 @@ package io.debezium.connector.mongodb;
 import java.util.function.Function;
 
 import org.bson.BsonDocument;
-import org.bson.Document;
-import org.bson.codecs.Encoder;
 import org.bson.json.JsonMode;
 import org.bson.json.JsonWriterSettings;
 
 import com.mongodb.BasicDBObject;
-import com.mongodb.MongoClientSettings;
 
 /**
  * A class responsible for serialization of message keys and values to MongoDB compatible JSON
  *
  * @author Jiri Pechanec
- *
  */
 class JsonSerialization {
 
     @FunctionalInterface
-    public static interface Transformer extends Function<Document, String> {
+    public interface Transformer extends Function<BsonDocument, String> {
     }
 
     private static final String ID_FIELD_NAME = "_id";
@@ -52,16 +48,19 @@ class JsonSerialization {
 
     private final Transformer transformer;
 
-    public JsonSerialization() {
-        final Encoder<Document> encoder = MongoClientSettings.getDefaultCodecRegistry().get(Document.class);
-        transformer = (doc) -> doc.toJson(COMPACT_JSON_SETTINGS, encoder);
+    JsonSerialization() {
+        transformer = (doc) -> doc.toJson(COMPACT_JSON_SETTINGS);
     }
 
-    public String getDocumentIdOplog(Document document) {
+    public String getDocumentId(BsonDocument document) {
         if (document == null) {
             return null;
         }
-        // The serialized value is in format {"_": xxx} so we need to remove the starting dummy field name and closing brace
+        // Jackson can't serialize bson out of the box, so we have to use the bson
+        // .toJson() method. But .toJson() doesn't work on simple values like bson
+        // strings and bson numbers, only on bson objects. So we have to first nest
+        // the id in a bson object in the format {"_": xxx}, then serialize it using
+        // .toJson(), then remove the starting dummy field and closing brace.
         final String keyValue = new BasicDBObject("_", document.get(ID_FIELD_NAME)).toJson(SIMPLE_JSON_SETTINGS);
         final int start = 6;
         final int end = keyValue.length() - 1;
@@ -71,21 +70,7 @@ class JsonSerialization {
         return keyValue.substring(start, end);
     }
 
-    public String getDocumentIdChangeStream(BsonDocument document) {
-        if (document == null) {
-            return null;
-        }
-        // The serialized value is in format {"_": xxx} so we need to remove the starting dummy field name and closing brace
-        final String keyValue = document.toJson(SIMPLE_JSON_SETTINGS);
-        final int start = 8;
-        final int end = keyValue.length() - 1;
-        if (!(end > start)) {
-            throw new IllegalStateException("Serialized JSON object '" + keyValue + "' is not in expected format");
-        }
-        return keyValue.substring(start, end);
-    }
-
-    public String getDocumentValue(Document document) {
+    public String getDocumentValue(BsonDocument document) {
         return transformer.apply(document);
     }
 

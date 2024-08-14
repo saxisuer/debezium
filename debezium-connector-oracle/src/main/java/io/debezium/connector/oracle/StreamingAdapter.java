@@ -5,13 +5,19 @@
  */
 package io.debezium.connector.oracle;
 
+import java.sql.SQLException;
+
 import io.debezium.config.Configuration;
+import io.debezium.connector.base.ChangeEventQueueMetrics;
 import io.debezium.pipeline.ErrorHandler;
 import io.debezium.pipeline.EventDispatcher;
+import io.debezium.pipeline.source.spi.EventMetadataProvider;
 import io.debezium.pipeline.source.spi.StreamingChangeEventSource;
 import io.debezium.pipeline.spi.OffsetContext;
+import io.debezium.relational.RelationalSnapshotChangeEventSource.RelationalSnapshotContext;
 import io.debezium.relational.TableId;
 import io.debezium.relational.history.HistoryRecordComparator;
+import io.debezium.snapshot.SnapshotterService;
 import io.debezium.util.Clock;
 
 /**
@@ -19,7 +25,7 @@ import io.debezium.util.Clock;
  *
  * @author Chris Cranford
  */
-public interface StreamingAdapter {
+public interface StreamingAdapter<T extends AbstractOracleStreamingChangeEventSourceMetrics> {
 
     /**
      * Controls whether table names are viewed as case-sensitive or not.
@@ -54,7 +60,12 @@ public interface StreamingAdapter {
                                                                                OracleDatabaseSchema schema,
                                                                                OracleTaskContext taskContext,
                                                                                Configuration jdbcConfig,
-                                                                               OracleStreamingChangeEventSourceMetrics streamingMetrics);
+                                                                               T streamingMetrics, SnapshotterService snapshotterService);
+
+    T getStreamingMetrics(OracleTaskContext taskContext,
+                          ChangeEventQueueMetrics changeEventQueueMetrics,
+                          EventMetadataProvider metadataProvider,
+                          OracleConnectorConfig connectorConfig);
 
     /**
      * Returns whether table names are case sensitive.
@@ -70,4 +81,46 @@ public interface StreamingAdapter {
     default TableNameCaseSensitivity getTableNameCaseSensitivity(OracleConnection connection) {
         return TableNameCaseSensitivity.SENSITIVE;
     }
+
+    /**
+     * Returns the offset context based on the snapshot state.
+     *
+     * @param ctx the relational snapshot context, should never be {@code null}
+     * @param connectorConfig the connector configuration, should never be {@code null}
+     * @param connection the database connection, should never be {@code null}
+     * @return the offset context, never {@code null}
+     * @throws SQLException if a database error occurred
+     */
+    OracleOffsetContext determineSnapshotOffset(RelationalSnapshotContext<OraclePartition, OracleOffsetContext> ctx,
+                                                OracleConnectorConfig connectorConfig, OracleConnection connection)
+            throws SQLException;
+
+    /**
+     * Returns the value converter for the streaming adapter.
+     *
+     * @param connectorConfig the connector configuration, shoudl never be {@code null}
+     * @param connection the database connection, should never be {@code null}
+     * @return the value converter to be used
+     */
+    default OracleValueConverters getValueConverter(OracleConnectorConfig connectorConfig, OracleConnection connection) {
+        return new OracleValueConverters(connectorConfig, connection);
+    }
+
+    /**
+     * Returns the Scn stored in the offset.
+     *
+     * @param offsetContext the connector offset context
+     *
+     * @return the {@code Scn} stored in the offset
+     */
+    Scn getOffsetScn(OracleOffsetContext offsetContext);
+
+    /**
+     * Creates a copy of the existing offsets.
+     *
+     * @param connectorConfig the connector configuration, should never be {@code null}
+     * @param offsetContext the current offset context, should never be {@code null}
+     * @return a copy of the offset context for this adapter
+     */
+    OracleOffsetContext copyOffset(OracleConnectorConfig connectorConfig, OracleOffsetContext offsetContext);
 }

@@ -12,21 +12,23 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Objects;
 
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
-import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.errors.DataException;
 import org.bson.BsonArray;
 import org.bson.BsonDocument;
 import org.bson.BsonType;
 import org.bson.BsonValue;
 
+import io.debezium.DebeziumException;
 import io.debezium.connector.mongodb.transforms.ExtractNewDocumentState.ArrayEncoding;
 import io.debezium.schema.FieldNameSelector;
 import io.debezium.schema.FieldNameSelector.FieldNamer;
+import io.debezium.schema.SchemaNameAdjuster;
 
 /**
  * MongoDataConverter handles translating MongoDB strings to Kafka Connect schemas and row data to Kafka
@@ -53,7 +55,7 @@ public class MongoDataConverter {
     }
 
     public MongoDataConverter(ArrayEncoding arrayEncoding) {
-        this(arrayEncoding, FieldNameSelector.defaultNonRelationalSelector(false), false);
+        this(arrayEncoding, FieldNameSelector.defaultNonRelationalSelector(SchemaNameAdjuster.NO_OP), false);
     }
 
     public Struct convertRecord(Entry<String, BsonValue> keyvalueforStruct, Schema schema, Struct struct) {
@@ -178,7 +180,7 @@ public class MongoDataConverter {
                             List<BsonValue> arrValues = keyvalueforStruct.getValue().asArray().getValues();
                             ArrayList<Object> list = new ArrayList<>();
 
-                            arrValues.stream().forEach(arrValue -> {
+                            arrValues.forEach(arrValue -> {
                                 final Schema valueSchema;
                                 if (Arrays.asList(BsonType.ARRAY, BsonType.DOCUMENT).contains(valueType)) {
                                     valueSchema = schema.field(key).schema().valueSchema();
@@ -424,12 +426,13 @@ public class MongoDataConverter {
                 final SchemaBuilder documentSchemaBuilder = SchemaBuilder.struct().name(builder.name() + "." + key).optional();
                 final Map<String, BsonType> union = new HashMap<>();
                 if (value.isArray()) {
-                    for (BsonValue element : value.asArray()) {
-                        subSchema(documentSchemaBuilder, union, element.asDocument());
+                    value.asArray().forEach(f -> subSchema(documentSchemaBuilder, union, f.asDocument(), true));
+                    if (documentSchemaBuilder.fields().size() == 0) {
+                        value.asArray().forEach(f -> subSchema(documentSchemaBuilder, union, f.asDocument(), false));
                     }
                 }
                 else {
-                    subSchema(documentSchemaBuilder, union, value.asDocument());
+                    subSchema(documentSchemaBuilder, union, value.asDocument(), false);
                 }
                 return documentSchemaBuilder.build();
             case ARRAY:
@@ -440,17 +443,19 @@ public class MongoDataConverter {
         }
     }
 
-    private void subSchema(SchemaBuilder documentSchemaBuilder, Map<String, BsonType> union, BsonDocument arrayDocs) {
+    private void subSchema(SchemaBuilder documentSchemaBuilder, Map<String, BsonType> union, BsonDocument arrayDocs, boolean emptyChecker) {
         for (Entry<String, BsonValue> arrayDoc : arrayDocs.entrySet()) {
             final String key = fieldNamer.fieldNameFor(arrayDoc.getKey());
+            if (emptyChecker && ((arrayDoc.getValue() instanceof BsonDocument && ((BsonDocument) arrayDoc.getValue()).size() == 0)
+                    || (arrayDoc.getValue() instanceof BsonArray && ((BsonArray) arrayDoc.getValue()).size() == 0))) {
+                continue;
+            }
             final BsonType prevType = union.putIfAbsent(key, arrayDoc.getValue().getBsonType());
             if (prevType == null) {
                 addFieldSchema(arrayDoc, documentSchemaBuilder);
             }
-            else if (prevType != arrayDoc.getValue().getBsonType()) {
-                throw new ConnectException("Field " + key + " of schema " + documentSchemaBuilder.name()
-                        + " is not the same type for all documents in the array.\n"
-                        + "Check option 'struct' of parameter 'array.encoding'");
+            else {
+                testArrayElementType(documentSchemaBuilder, arrayDoc, union);
             }
         }
     }
@@ -461,13 +466,7 @@ public class MongoDataConverter {
             for (BsonValue element : value.asArray()) {
                 final BsonDocument arrayDocs = element.asDocument();
                 for (Entry<String, BsonValue> arrayDoc : arrayDocs.entrySet()) {
-                    final String docKey = fieldNamer.fieldNameFor(arrayDoc.getKey());
-                    final BsonType prevType = union.putIfAbsent(docKey, arrayDoc.getValue().getBsonType());
-                    if (prevType != null && prevType != arrayDoc.getValue().getBsonType()) {
-                        throw new ConnectException("Field " + docKey + " of schema " + builder.name()
-                                + " is not the same type for all documents in the array.\n"
-                                + "Check option 'struct' of parameter 'array.encoding'");
-                    }
+                    testArrayElementType(builder, arrayDoc, union);
                 }
             }
         }
@@ -480,9 +479,30 @@ public class MongoDataConverter {
         else {
             for (BsonValue element : value.asArray()) {
                 if (element.getBsonType() != valueType) {
-                    throw new ConnectException("Field " + key + " of schema " + builder.name() + " is not a homogenous array.\n"
+                    throw new DebeziumException("Field " + key + " of schema " + builder.name() + " is not a homogenous array.\n"
                             + "Check option 'struct' of parameter 'array.encoding'");
                 }
+            }
+        }
+    }
+
+    private void testArrayElementType(SchemaBuilder builder, Entry<String, BsonValue> arrayDoc, Map<String, BsonType> union) {
+        final String docKey = fieldNamer.fieldNameFor(arrayDoc.getKey());
+        final BsonType currentType = arrayDoc.getValue().getBsonType();
+        final BsonType prevType = union.putIfAbsent(docKey, currentType);
+
+        if (prevType != null) {
+            if ((prevType == BsonType.NULL || currentType == BsonType.NULL)
+                    && !Objects.equals(prevType, currentType)) {
+                // set non-null type as real schema
+                if (prevType == BsonType.NULL) {
+                    union.put(docKey, currentType);
+                }
+            }
+            else if (!Objects.equals(prevType, currentType)) {
+                throw new DebeziumException("Field " + docKey + " of schema " + builder.name()
+                        + " is not the same type for all documents in the array.\n"
+                        + "Check option 'struct' of parameter 'array.encoding'");
             }
         }
     }

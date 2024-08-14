@@ -4,7 +4,7 @@ The MIT License (MIT).
 Copyright (c) 2015-2017, Ivan Kochurkin (kvanttt@gmail.com), Positive Technologies.
 Copyright (c) 2017, Ivan Khudyashev (IHudyashov@ptsecurity.com)
 
-https://github.com/antlr/grammars-v4/blob/master/mysql/MySqlParser.g4
+https://github.com/antlr/grammars-v4/blob/master/sql/mysql/Positive-Technologies/MySqlParser.g4
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -42,9 +42,13 @@ sqlStatements
     ;
 
 sqlStatement
-    : ddlStatement | dmlStatement | transactionStatement
+    : setStatementFor? (ddlStatement | dmlStatement | transactionStatement // setStatementFor is MariaDB-specific only
     | replicationStatement | preparedStatement
-    | administrationStatement | utilityStatement
+    | administrationStatement | utilityStatement)
+    ;
+
+setStatementFor                                            // setStatementFor is MariaDB-specific only
+    :SET STATEMENT ID EQUAL_SYMBOL constant (COMMA ID EQUAL_SYMBOL constant)* FOR
     ;
 
 emptyStatement
@@ -55,15 +59,14 @@ ddlStatement
     : createDatabase | createEvent | createIndex
     | createLogfileGroup | createProcedure | createFunction
     | createServer | createTable | createTablespaceInnodb
-    | createTablespaceNdb | createTrigger | createView
-    | createRole
+    | createTablespaceNdb | createTrigger | createView | createRole | createSequence
     | alterDatabase | alterEvent | alterFunction
     | alterInstance | alterLogfileGroup | alterProcedure
-    | alterServer | alterTable | alterTablespace | alterView
+    | alterServer | alterTable | alterTablespace | alterView | alterSequence
     | dropDatabase | dropEvent | dropIndex
     | dropLogfileGroup | dropProcedure | dropFunction
     | dropServer | dropTable | dropTablespace
-    | dropTrigger | dropView
+    | dropTrigger | dropView | dropRole | dropSequence | setRole
     | renameTable | truncateTable
     ;
 
@@ -71,7 +74,8 @@ dmlStatement
     : selectStatement | insertStatement | updateStatement
     | deleteStatement | replaceStatement | callStatement
     | loadDataStatement | loadXmlStatement | doStatement
-    | handlerStatement
+    | handlerStatement | valuesStatement | withStatement
+    | tableStatement
     ;
 
 transactionStatement
@@ -100,6 +104,7 @@ compoundStatement
     | caseStatement | ifStatement | leaveStatement
     | loopStatement | repeatStatement | whileStatement
     | iterateStatement | returnStatement | cursorStatement
+    | withStatement dmlStatement
     ;
 
 administrationStatement
@@ -139,13 +144,13 @@ createEvent
     ;
 
 createIndex
-    : CREATE (OR REPLACE)?                                        // OR is MariaDB-specific only
+    : CREATE orReplace?                                         // orReplace is MariaDB-specific only
       intimeAction=(ONLINE | OFFLINE)?
       indexCategory=(UNIQUE | FULLTEXT | SPATIAL)? INDEX
-      (IF NOT EXISTS)?                                            // MariaDB-specific only
+      ifNotExists?                                              // ifNotExists is MariaDB-specific only
       uid indexType?
       ON tableName indexColumnNames
-      (WAIT decimalLiteral | NOWAIT)?                             // MariaDB-specific only
+      waitNowaitClause?                                         // waitNowaitClause is MariaDB-specific only
       indexOption*
       (
         ALGORITHM EQUAL_SYMBOL? algType=(DEFAULT | INPLACE | COPY | NOCOPY | INSTANT)  // NOCOPY, INSTANT are MariaDB-specific only
@@ -166,24 +171,24 @@ createLogfileGroup
     ;
 
 createProcedure
-    : CREATE ownerStatement?
-    PROCEDURE fullId
+    : CREATE orReplace? ownerStatement?                         // orReplace is MariaDB-specific only
+      PROCEDURE fullId
       '(' procedureParameter? (',' procedureParameter)* ')'
       routineOption*
-    routineBody
+      routineBody
     ;
 
 createFunction
-    : CREATE ownerStatement?
-    FUNCTION fullId
+    : CREATE orReplace? ownerStatement? AGGREGATE?              // orReplace is MariaDB-specific only
+      FUNCTION ifNotExists? fullId                              // ifNotExists is MariaDB-specific only
       '(' functionParameter? (',' functionParameter)* ')'
       RETURNS dataType
       routineOption*
-    (routineBody | returnStatement)
+      (routineBody | returnStatement)
     ;
 
 createRole
-    : CREATE ROLE (IF NOT EXISTS)? roleName
+    : CREATE ROLE ifNotExists? roleName (',' roleName)*
     ;
 
 createServer
@@ -193,18 +198,18 @@ createServer
     ;
 
 createTable
-    : CREATE TEMPORARY? TABLE ifNotExists?
+    : CREATE orReplace? TEMPORARY? TABLE ifNotExists?           // orReplace is MariaDB-specific only
        tableName
        (
          LIKE tableName
          | '(' LIKE parenthesisTable=tableName ')'
        )                                                            #copyCreateTable
-    | CREATE TEMPORARY? TABLE ifNotExists?
+    | CREATE orReplace? TEMPORARY? TABLE ifNotExists?           // orReplace is MariaDB-specific only
        tableName createDefinitions?
        ( tableOption (','? tableOption)* )?
        partitionDefinitions? keyViolate=(IGNORE | REPLACE)?
        AS? selectStatement                                          #queryCreateTable
-    | CREATE TEMPORARY? TABLE ifNotExists?
+    | CREATE orReplace? TEMPORARY? TABLE ifNotExists?           // orReplace is MariaDB-specific only
        tableName createDefinitions
        ( tableOption (','? tableOption)* )?
        partitionDefinitions?                                        #columnCreateTable
@@ -232,8 +237,8 @@ createTablespaceNdb
     ;
 
 createTrigger
-    : CREATE (OR REPLACE)? ownerStatement?  // OR is MariaDB-specific only
-      TRIGGER thisTrigger=fullId
+    : CREATE orReplace? ownerStatement?                         // orReplace is MariaDB-specific only
+      TRIGGER ifNotExists? thisTrigger=fullId
       triggerTime=(BEFORE | AFTER)
       triggerEvent=(INSERT | UPDATE | DELETE)
       ON tableName FOR EACH ROW
@@ -259,25 +264,62 @@ cteColumnName
     ;
 
 createView
-    : CREATE (OR REPLACE)?
+    : CREATE orReplace?                                         // orReplace is MariaDB-specific only
       (
         ALGORITHM '=' algType=(UNDEFINED | MERGE | TEMPTABLE)
       )?
       ownerStatement?
       (SQL SECURITY secContext=(DEFINER | INVOKER))?
-      VIEW fullId ('(' uidList ')')? AS withClause? selectStatement
-      (WITH checkOption=(CASCADED | LOCAL)? CHECK OPTION)?
+      VIEW fullId ('(' uidList ')')? AS
+      (
+        '(' withClause? selectStatement ')'
+        |
+        withClause? selectStatement (WITH checkOption=(CASCADED | LOCAL)? CHECK OPTION)?
+      )
+    ;
+
+createSequence
+    : CREATE orReplace? TEMPORARY? SEQUENCE ifNotExists? fullId  // orReplace is MariaDB-specific only
+      (sequenceSpec | tableOption)*
+    ;
+
+sequenceSpec
+    : INCREMENT (BY | '=')? decimalLiteral
+    | MINVALUE '='? decimalLiteral
+    | NO MINVALUE
+    | NOMINVALUE
+    | MAXVALUE '='? decimalLiteral
+    | NO MAXVALUE
+    | NOMAXVALUE
+    | START (WITH | '=')? decimalLiteral
+    | CACHE '='? decimalLiteral
+    | NOCACHE
+    | CYCLE
+    | NOCYCLE
+    | RESTART (WITH | '=')? decimalLiteral // use for alter sequence statment
     ;
 
 // details
 
 createDatabaseOption
-    : DEFAULT? (CHARACTER SET | CHARSET | CHAR SET) '='? (charsetName | DEFAULT)
+    : DEFAULT? charSet '='? (charsetName | DEFAULT)
     | DEFAULT? COLLATE '='? collationName
+    | DEFAULT? ENCRYPTION '='? STRING_LITERAL
+    | READ ONLY '='? (DEFAULT | ZERO_DECIMAL | ONE_DECIMAL)
+    ;
+
+charSet
+    : CHARACTER SET
+    | CHARSET
+    | CHAR SET
+    ;
+
+currentUserExpression
+    : CURRENT_USER ( '(' ')')?
     ;
 
 ownerStatement
-    : DEFINER '=' (userName | CURRENT_USER ( '(' ')')?)
+    : DEFINER '=' (userName | currentUserExpression | CURRENT_ROLE) // CURRENT_ROLE is MariaDB-specific only
     ;
 
 scheduleExpression
@@ -366,21 +408,23 @@ createDefinitions
     ;
 
 createDefinition
-    : uid columnDefinition                                          #columnDeclaration
-    | tableConstraint                                               #constraintDeclaration
+    : fullColumnName columnDefinition                               #columnDeclaration
+    | tableConstraint NOT? ENFORCED?                                #constraintDeclaration
     | indexColumnDefinition                                         #indexDeclaration
     ;
 
 columnDefinition
-    : dataType columnConstraint*
+    : dataType columnConstraint* NOT? ENFORCED?
     ;
 
 columnConstraint
     : nullNotnull                                                   #nullColumnConstraint
     | DEFAULT defaultValue                                          #defaultColumnConstraint
-    | (VISIBLE | INVISIBLE)                                         #invisibleColumnConstraint
+    | VISIBLE                                                       #visibilityColumnConstraint
+    | INVISIBLE                                                     #invisibilityColumnConstraint
     | (AUTO_INCREMENT | ON UPDATE currentTimestamp)                 #autoIncrementColumnConstraint
     | PRIMARY? KEY                                                  #primaryKeyColumnConstraint
+    | CLUSTERING KEY                                                #clusteringKeyColumnConstraint       // Tokudb-specific only
     | UNIQUE KEY?                                                   #uniqueKeyColumnConstraint
     | COMMENT STRING_LITERAL                                        #commentColumnConstraint
     | COLUMN_FORMAT colformat=(FIXED | DYNAMIC | DEFAULT)           #formatColumnConstraint
@@ -405,6 +449,7 @@ tableConstraint
       referenceDefinition                                           #foreignKeyTableConstraint
     | (CONSTRAINT name=uid?)?
       CHECK '(' expression ')'                                      #checkTableConstraint
+    | CLUSTERING KEY index=uid? indexColumnNames                    #clusteringKeyTableConstraint   // Tokudb-specific only
     ;
 
 referenceDefinition
@@ -425,7 +470,7 @@ referenceAction
     ;
 
 referenceControlType
-    : RESTRICT | CASCADE | SET NULL_LITERAL | NO ACTION
+    : RESTRICT | CASCADE | SET NULL_LITERAL | NO ACTION | SET DEFAULT
     ;
 
 indexColumnDefinition
@@ -438,15 +483,17 @@ indexColumnDefinition
 
 tableOption
     : ENGINE '='? engineName?                                                       #tableOptionEngine
+    | ENGINE_ATTRIBUTE '='? STRING_LITERAL                                          #tableOptionEngineAttribute
+    | AUTOEXTEND_SIZE '='? decimalLiteral                                           #tableOptionAutoextendSize
     | AUTO_INCREMENT '='? decimalLiteral                                            #tableOptionAutoIncrement
     | AVG_ROW_LENGTH '='? decimalLiteral                                            #tableOptionAverage
-    | DEFAULT? (CHARACTER SET | CHARSET | CHAR SET) '='? (charsetName|DEFAULT)      #tableOptionCharset
+    | DEFAULT? charSet '='? (charsetName|DEFAULT)                                   #tableOptionCharset
     | (CHECKSUM | PAGE_CHECKSUM) '='? boolValue=('0' | '1')                         #tableOptionChecksum
     | DEFAULT? COLLATE '='? collationName                                           #tableOptionCollate
     | COMMENT '='? STRING_LITERAL                                                   #tableOptionComment
     | COMPRESSION '='? (STRING_LITERAL | ID)                                        #tableOptionCompression
     | CONNECTION '='? STRING_LITERAL                                                #tableOptionConnection
-    | DATA DIRECTORY '='? STRING_LITERAL                                            #tableOptionDataDirectory
+    | (DATA | INDEX) DIRECTORY '='? STRING_LITERAL                                  #tableOptionDataDirectory
     | DELAY_KEY_WRITE '='? boolValue=('0' | '1')                                    #tableOptionDelay
     | ENCRYPTION '='? STRING_LITERAL                                                #tableOptionEncryption
     | encryptedLiteral '='? (YES | NO)                                              #tableOptionEncrypted
@@ -465,14 +512,17 @@ tableOption
           DEFAULT | DYNAMIC | FIXED | COMPRESSED
           | REDUNDANT | COMPACT | ID
         )                                                                           #tableOptionRowFormat
+    | START TRANSACTION                                                             #tableOptionStartTransaction
+    | SECONDARY_ENGINE_ATTRIBUTE '='? STRING_LITERAL                                #tableOptionSecondaryEngineAttribute
     | STATS_AUTO_RECALC '='? extBoolValue=(DEFAULT | '0' | '1')                     #tableOptionRecalculation
     | STATS_PERSISTENT '='? extBoolValue=(DEFAULT | '0' | '1')                      #tableOptionPersistent
-    | STATS_SAMPLE_PAGES '='? decimalLiteral                                        #tableOptionSamplePage
+    | STATS_SAMPLE_PAGES '='? (DEFAULT | decimalLiteral)                            #tableOptionSamplePage
     | TABLESPACE uid tablespaceStorage?                                             #tableOptionTablespace
     | TABLE_TYPE '=' tableType                                                      #tableOptionTableType
     | tablespaceStorage                                                             #tableOptionTablespace
     | TRANSACTIONAL '='? ('0' | '1')                                                #tableOptionTransactional
     | UNION '='? '(' tables ')'                                                     #tableOptionUnion
+    | WITH SYSTEM VERSIONING                                                        #tableOptionWithSystemVersioning // MariaDB-specific only
     ;
 
 tableType
@@ -496,9 +546,24 @@ partitionDefinitions
 partitionFunctionDefinition
     : LINEAR? HASH '(' expression ')'                               #partitionFunctionHash
     | LINEAR? KEY (ALGORITHM '=' algType=('1' | '2'))?
-      '(' uidList ')'                                               #partitionFunctionKey
+      '(' uidList? ')'                                              #partitionFunctionKey // Optional uidList for MySQL only
     | RANGE ( '(' expression ')' | COLUMNS '(' uidList ')' )        #partitionFunctionRange
     | LIST ( '(' expression ')' | COLUMNS '(' uidList ')' )         #partitionFunctionList
+    | SYSTEM_TIME
+        ( expression | LIMIT expression )
+        ( STARTS ( TIMESTAMP timestampValue | timestampValue ) )?
+        AUTO?
+        partitionSystemVersionDefinitions?                          #partitionSystemVersion // MariaDB-specific
+    ;
+
+// MariaDB-specific
+partitionSystemVersionDefinitions
+    : '(' partitionSystemVersionDefinition (',' partitionSystemVersionDefinition)* ')'
+    ;
+
+// MariaDB-specific
+partitionSystemVersionDefinition
+    : PARTITION uid ( HISTORY | CURRENT )
     ;
 
 subpartitionFunctionDefinition
@@ -513,10 +578,10 @@ partitionDefinition
           partitionDefinerAtom (',' partitionDefinerAtom)*
       ')'
       partitionOption*
-      ( '(' subpartitionDefinition (',' subpartitionDefinition)* ')' )?       #partitionComparision
+      ( '(' subpartitionDefinition (',' subpartitionDefinition)* ')' )?       #partitionComparison
     | PARTITION uid VALUES LESS THAN
       partitionDefinerAtom partitionOption*
-      ( '(' subpartitionDefinition (',' subpartitionDefinition)* ')' )?       #partitionComparision
+      ( '(' subpartitionDefinition (',' subpartitionDefinition)* ')' )?       #partitionComparison
     | PARTITION uid VALUES IN
       '('
           partitionDefinerAtom (',' partitionDefinerAtom)*
@@ -601,7 +666,7 @@ alterServer
 
 alterTable
     : ALTER intimeAction=(ONLINE | OFFLINE)?
-      IGNORE? TABLE tableName
+      IGNORE? TABLE ifExists? tableName waitNowaitClause? // ifExists is MariaDB-specific
       (alterSpecification (',' alterSpecification)*)?
       partitionDefinitions?
     ;
@@ -625,50 +690,62 @@ alterView
       (WITH checkOpt=(CASCADED | LOCAL)? CHECK OPTION)?
     ;
 
+alterSequence
+    : ALTER SEQUENCE ifExists? fullId sequenceSpec+                 // MariaDB-specific only
+    ;
+
 // details
 
 alterSpecification
     : tableOption (','? tableOption)*                               #alterByTableOption
-    | ADD COLUMN? ifNotExists? uid columnDefinition (FIRST | AFTER uid)?         #alterByAddColumn // ifNotExists is MariaDB-specific
-    | ADD COLUMN?
+    | ADD COLUMN? ifNotExists? uid columnDefinition (FIRST | AFTER uid)?         #alterByAddColumn // ifNotExists is MariaDB-specific only
+    | ADD COLUMN? ifNotExists?                                      // ifNotExists is MariaDB-specific only
         '('
           uid columnDefinition ( ',' uid columnDefinition)*
         ')'                                                         #alterByAddColumns
-    | ADD indexFormat=(INDEX | KEY) ifNotExists? uid? indexType?
-      indexColumnNames indexOption*                                 #alterByAddIndex // ifNotExists is MariaDB-specific
+    | ADD indexFormat=(INDEX | KEY) ifNotExists? uid? indexType?    // ifNotExists is MariaDB-specific only
+      indexColumnNames indexOption*                                 #alterByAddIndex
     | ADD (CONSTRAINT name=uid?)? PRIMARY KEY index=uid?
       indexType? indexColumnNames indexOption*                      #alterByAddPrimaryKey
-    | ADD (CONSTRAINT name=uid?)? UNIQUE
+    | ADD (CONSTRAINT name=uid?)? UNIQUE ifNotExists?
       indexFormat=(INDEX | KEY)? indexName=uid?
       indexType? indexColumnNames indexOption*                      #alterByAddUniqueKey
     | ADD keyType=(FULLTEXT | SPATIAL)
       indexFormat=(INDEX | KEY)? uid?
       indexColumnNames indexOption*                                 #alterByAddSpecialIndex
-    | ADD (CONSTRAINT name=uid?)? FOREIGN KEY ifNotExists?
-      indexName=uid? indexColumnNames referenceDefinition           #alterByAddForeignKey // ifNotExists is MariaDB-specific
-    | ADD (CONSTRAINT name=uid?)? CHECK '(' expression ')'          #alterByAddCheckTableConstraint
-    | ALGORITHM '='? algType=(DEFAULT | INSTANT | INPLACE | COPY)   #alterBySetAlgorithm
+    | ADD (CONSTRAINT name=uid?)? FOREIGN KEY ifNotExists?          // ifNotExists is MariaDB-specific only
+      indexName=uid? indexColumnNames referenceDefinition           #alterByAddForeignKey
+    | ADD (CONSTRAINT name=uid?)? CHECK ( uid | stringLiteral | '(' expression ')' )
+        NOT? ENFORCED?                                              #alterByAddCheckTableConstraint
+    | ALTER (CONSTRAINT name=uid?)? CHECK ( uid | stringLiteral | '(' expression ')' )
+        NOT? ENFORCED?                                              #alterByAlterCheckTableConstraint
+    | ALGORITHM '='?
+      algType=(DEFAULT | INSTANT | INPLACE | COPY | NOCOPY)         #alterBySetAlgorithm // here NOCOPY is MariaDB-specific only
     | ALTER COLUMN? uid
       (SET DEFAULT defaultValue | DROP DEFAULT)                     #alterByChangeDefault
-    | CHANGE COLUMN? ifExists? oldColumn=uid
+    | CHANGE COLUMN? ifExists? oldColumn=uid                        // here ifExists is MariaDB-specific only
       newColumn=uid columnDefinition
-      (FIRST | AFTER afterColumn=uid)?                              #alterByChangeColumn // ifExists is MariaDB-specific
+      (FIRST | AFTER afterColumn=uid)?                              #alterByChangeColumn
     | RENAME COLUMN oldColumn=uid TO newColumn=uid                  #alterByRenameColumn
     | LOCK '='? lockType=(DEFAULT | NONE | SHARED | EXCLUSIVE)      #alterByLock
-    | MODIFY COLUMN? ifExists?
-      uid columnDefinition (FIRST | AFTER uid)?                     #alterByModifyColumn // ifExists is MariaDB-specific
-    | DROP COLUMN? ifExists? uid RESTRICT?                          #alterByDropColumn // ifExists is MariaDB-specific
-    | DROP (CONSTRAINT | CHECK) uid                                 #alterByDropConstraintCheck
+    | MODIFY COLUMN? ifExists?                                      // here ifExists is MariaDB-specific only
+      uid columnDefinition (FIRST | AFTER uid)?                     #alterByModifyColumn
+    | DROP COLUMN? ifExists? uid RESTRICT?                          #alterByDropColumn // here ifExists is MariaDB-specific only
+    | DROP (CONSTRAINT | CHECK) ifExists? uid                       #alterByDropConstraintCheck // here ifExists is MariaDB-specific only
     | DROP PRIMARY KEY                                              #alterByDropPrimaryKey
-    | DROP indexFormat=(INDEX | KEY) ifExists? uid                  #alterByDropIndex
+    | DROP indexFormat=(INDEX | KEY) ifExists? uid                  #alterByDropIndex  // here ifExists is MariaDB-specific only
     | RENAME indexFormat=(INDEX | KEY) uid TO uid                   #alterByRenameIndex
+    | ALTER COLUMN? uid (
+        SET DEFAULT ( stringLiteral | '(' expression ')' )
+        | SET (VISIBLE | INVISIBLE)
+        | DROP DEFAULT)                                             #alterByAlterColumnDefault
     | ALTER INDEX uid (VISIBLE | INVISIBLE)                         #alterByAlterIndexVisibility
-    | DROP FOREIGN KEY uid ifExists?                                #alterByDropForeignKey // ifExists is MariaDB-specific
+    | DROP FOREIGN KEY ifExists? uid dottedId?                      #alterByDropForeignKey // here ifExists and dottedId is MariaDB-specific only
     | DISABLE KEYS                                                  #alterByDisableKeys
     | ENABLE KEYS                                                   #alterByEnableKeys
     | RENAME renameFormat=(TO | AS)? (uid | fullId)                 #alterByRename
     | ORDER BY uidList                                              #alterByOrder
-    | CONVERT TO CHARACTER SET charsetName
+    | CONVERT TO (CHARSET | CHARACTER SET) charsetName
       (COLLATE collationName)?                                      #alterByConvertCharset
     | DEFAULT? CHARACTER SET '=' charsetName
       (COLLATE '=' collationName)?                                  #alterByDefaultCharset
@@ -676,19 +753,21 @@ alterSpecification
     | IMPORT TABLESPACE                                             #alterByImportTablespace
     | FORCE                                                         #alterByForce
     | validationFormat=(WITHOUT | WITH) VALIDATION                  #alterByValidate
-    | ADD PARTITION ifNotExists?
-        '('
-          partitionDefinition (',' partitionDefinition)*
-        ')'                                                         #alterByAddPartition // ifNotExists is MariaDB-specific
-    | DROP PARTITION ifExists? uidList                              #alterByDropPartition // ifExists is MariaDB-specific
+    | ADD COLUMN? ifNotExists?                                      // ifNotExists is MariaDB-specific only
+        '(' createDefinition (',' createDefinition)* ')'            #alterByAddDefinitions
+    | alterPartitionSpecification                                   #alterPartition
+    ;
+
+alterPartitionSpecification
+    : ADD PARTITION ifNotExists?                                    // ifNotExists is MariaDB-specific only
+      '(' partitionDefinition (',' partitionDefinition)* ')'        #alterByAddPartition
+    | DROP PARTITION ifExists? uidList                              #alterByDropPartition // here ifExists is MariaDB-specific only
     | DISCARD PARTITION (uidList | ALL) TABLESPACE                  #alterByDiscardPartition
     | IMPORT PARTITION (uidList | ALL) TABLESPACE                   #alterByImportPartition
     | TRUNCATE PARTITION (uidList | ALL)                            #alterByTruncatePartition
     | COALESCE PARTITION decimalLiteral                             #alterByCoalescePartition
     | REORGANIZE PARTITION uidList
-        INTO '('
-          partitionDefinition (',' partitionDefinition)*
-        ')'                                                         #alterByReorganizePartition
+      INTO '(' partitionDefinition (',' partitionDefinition)* ')'   #alterByReorganizePartition
     | EXCHANGE PARTITION uid WITH TABLE tableName
       (validationFormat=(WITH | WITHOUT) VALIDATION)?               #alterByExchangePartition
     | ANALYZE PARTITION (uidList | ALL)                             #alterByAnalyzePartition
@@ -699,7 +778,6 @@ alterSpecification
     | REMOVE PARTITIONING                                           #alterByRemovePartitioning
     | UPGRADE PARTITIONING                                          #alterByUpgradePartitioning
     ;
-
 
 //    Drop statements
 
@@ -712,13 +790,14 @@ dropEvent
     ;
 
 dropIndex
-    : DROP INDEX ifExists? intimeAction=(ONLINE | OFFLINE)?
+    : DROP INDEX ifExists? intimeAction=(ONLINE | OFFLINE)?        // here ifExists is MariaDB-specific only
       uid ON tableName
       (
         ALGORITHM '='? algType=(DEFAULT | INPLACE | COPY)
         | LOCK '='?
           lockType=(DEFAULT | NONE | SHARED | EXCLUSIVE)
       )*
+      waitNowaitClause?
     ;
 
 dropLogfileGroup
@@ -739,7 +818,7 @@ dropServer
 
 dropTable
     : DROP TEMPORARY? TABLE ifExists?
-      tables dropType=(RESTRICT | CASCADE)?
+      tables waitNowaitClause? dropType=(RESTRICT | CASCADE)?
     ;
 
 dropTablespace
@@ -755,6 +834,19 @@ dropView
       fullId (',' fullId)* dropType=(RESTRICT | CASCADE)?
     ;
 
+dropRole
+    : DROP ROLE ifExists? roleName (',' roleName)*
+    ;
+
+setRole
+    : SET DEFAULT ROLE (NONE | ALL | roleName (',' roleName)*)
+      TO (userName | uid) (',' (userName | uid))*
+    | SET ROLE roleOption
+    ;
+
+dropSequence
+    : DROP TEMPORARY? SEQUENCE ifExists? COMMENT_INPUT? fullId (',' fullId)*
+    ;
 
 //    Other DDL statements
 
@@ -764,11 +856,11 @@ renameTable
     ;
 
 renameTableClause
-    : tableName TO tableName
+    : tableName waitNowaitClause? TO tableName
     ;
 
 truncateTable
-    : TRUNCATE TABLE? tableName
+    : TRUNCATE TABLE? tableName waitNowaitClause?
     ;
 
 
@@ -805,7 +897,7 @@ insertStatement
       IGNORE? INTO? tableName
       (PARTITION '(' partitions=uidList? ')' )?
       (
-        ('(' columns=uidList ')')? insertStatementValue
+        ('(' columns=fullColumnNameList? ')')? insertStatementValue (AS? uid)?
         | SET
             setFirst=updatedElement
             (',' setElements+=updatedElement)*
@@ -868,7 +960,8 @@ replaceStatement
 selectStatement
     : querySpecification lockClause?                                #simpleSelect
     | queryExpression lockClause?                                   #parenthesisSelect
-    | querySpecificationNointo unionStatement+
+    | (querySpecificationNointo | queryExpressionNointo)
+        unionStatement+
         (
           UNION unionType=(ALL | DISTINCT)?
           (querySpecification | queryExpression)
@@ -880,7 +973,24 @@ selectStatement
           queryExpression
         )?
         orderByClause? limitClause? lockClause?                     #unionParenthesisSelect
+    | querySpecificationNointo (',' lateralStatement)+              #withLateralStatement
     ;
+
+// https://dev.mysql.com/doc/refman/8.0/en/values.html
+valuesStatement
+    : VALUES
+    '(' expressionsWithDefaults? ')'
+    (',' '(' expressionsWithDefaults? ')')*
+    ;
+
+withStatement
+  : WITH RECURSIVE? commonTableExpressions (',' commonTableExpressions)*
+  ;
+
+tableStatement
+  : TABLE tableName orderByClause? limitClause?
+  ;
+
 
 updateStatement
     : singleUpdateStatement | multipleUpdateStatement
@@ -904,14 +1014,14 @@ assignmentField
     ;
 
 lockClause
-    : FOR UPDATE | LOCK IN SHARE MODE
+    : (FOR UPDATE | LOCK IN SHARE MODE) lockOption?
     ;
 
 //    Detailed DML Statements
 
 singleDeleteStatement
     : DELETE priority=LOW_PRIORITY? QUICK? IGNORE?
-    FROM tableName
+    FROM tableName (AS? uid)?
       (PARTITION '(' uidList ')' )?
       (WHERE expression)?
       orderByClause? (LIMIT limitClauseAtom)?
@@ -952,7 +1062,7 @@ handlerCloseStatement
     ;
 
 singleUpdateStatement
-    : UPDATE priority=LOW_PRIORITY? IGNORE? tableName (AS? uid)?
+    : UPDATE priority=LOW_PRIORITY? IGNORE? tableSources (AS? uid)?
       SET updatedElement (',' updatedElement)*
       (WHERE expression)? orderByClause? limitClause?
     ;
@@ -980,6 +1090,7 @@ tableSources
 tableSource
     : tableSourceItem joinPart*                                     #tableSourceBase
     | '(' tableSourceItem joinPart* ')'                             #tableSourceNested
+    | jsonTable                                                     #tableJson
     ;
 
 tableSourceItem
@@ -1005,18 +1116,15 @@ indexHintType
     ;
 
 joinPart
-    : (INNER | CROSS)? JOIN tableSourceItem
-      (
-        ON expression
-        | USING '(' uidList ')'
-      )?                                                            #innerJoin
-    | STRAIGHT_JOIN tableSourceItem (ON expression)?                #straightJoin
-    | (LEFT | RIGHT) OUTER? JOIN tableSourceItem
-        (
-          ON expression
-          | USING '(' uidList ')'
-        )                                                           #outerJoin
+    : (INNER | CROSS)? JOIN LATERAL? tableSourceItem joinSpec*      #innerJoin
+    | STRAIGHT_JOIN tableSourceItem (ON expression)*                #straightJoin
+    | (LEFT | RIGHT) OUTER? JOIN LATERAL? tableSourceItem joinSpec* #outerJoin
     | NATURAL ((LEFT | RIGHT) OUTER?)? JOIN tableSourceItem         #naturalJoin
+    ;
+
+joinSpec
+    : (ON expression)
+    | USING '(' uidList ')'
     ;
 
 //    Select Statement's Details
@@ -1033,14 +1141,14 @@ queryExpressionNointo
 
 querySpecification
     : SELECT selectSpec* selectElements selectIntoExpression?
-      fromClause? orderByClause? limitClause?
+      fromClause? groupByClause? havingClause? windowClause? orderByClause? limitClause?
     | SELECT selectSpec* selectElements
-    fromClause? orderByClause? limitClause? selectIntoExpression?
+    fromClause? groupByClause? havingClause? windowClause? orderByClause? limitClause? selectIntoExpression?
     ;
 
 querySpecificationNointo
     : SELECT selectSpec* selectElements
-      fromClause? orderByClause? limitClause?
+      fromClause? groupByClause? havingClause? windowClause? orderByClause? limitClause? unionStatement?
     ;
 
 unionParenthesis
@@ -1050,6 +1158,43 @@ unionParenthesis
 unionStatement
     : UNION unionType=(ALL | DISTINCT)?
       (querySpecificationNointo | queryExpressionNointo)
+    ;
+
+lateralStatement
+    : LATERAL (querySpecificationNointo |
+               queryExpressionNointo |
+               ('(' (querySpecificationNointo | queryExpressionNointo) ')' (AS? uid)?)
+              )
+    ;
+
+// JSON
+
+// https://dev.mysql.com/doc/refman/8.0/en/json-table-functions.html
+jsonTable
+    : JSON_TABLE '('
+        expression ','
+        STRING_LITERAL
+        COLUMNS '(' jsonColumnList ')'
+      ')' (AS? uid)?
+    ;
+
+jsonColumnList
+    : jsonColumn (',' jsonColumn)*
+    ;
+
+jsonColumn
+    : fullColumnName ( FOR ORDINALITY
+                     | dataType ( PATH STRING_LITERAL jsonOnEmpty? jsonOnError?
+                                | EXISTS PATH STRING_LITERAL ) )
+    | NESTED PATH? STRING_LITERAL COLUMNS '(' jsonColumnList ')'
+    ;
+
+jsonOnEmpty
+    : (NULL_LITERAL | ERROR | DEFAULT defaultValue) ON EMPTY
+    ;
+
+jsonOnError
+    : (NULL_LITERAL | ERROR | DEFAULT defaultValue) ON ERROR
     ;
 
 // details
@@ -1103,13 +1248,20 @@ selectLinesInto
 fromClause
     : (FROM tableSources)?
       (WHERE whereExpr=expression)?
-      (
-        GROUP BY
+    ;
+
+groupByClause
+    :  GROUP BY
         groupByItem (',' groupByItem)*
         (WITH ROLLUP)?
-      )?
-      (HAVING havingExpr=expression)?
-      (WINDOW windowName AS '(' windowSpec ')' (',' windowName AS '(' windowSpec ')')*)?
+    ;
+
+havingClause
+    :  HAVING havingExpr=expression
+    ;
+
+windowClause
+    :  WINDOW windowName AS '(' windowSpec ')' (',' windowName AS '(' windowSpec ')')*
     ;
 
 groupByItem
@@ -1164,7 +1316,7 @@ releaseStatement
     ;
 
 lockTables
-    : LOCK TABLES lockTableElement (',' lockTableElement)*
+    : LOCK (TABLE | TABLES) lockTableElement (',' lockTableElement)* waitNowaitClause?
     ;
 
 unlockTables
@@ -1507,19 +1659,24 @@ alterUser
           (tlsNone=NONE | tlsOption (AND? tlsOption)* )
         )?
         (WITH userResourceOption+)?
-        (userPasswordOption | userLockOption)*                      #alterUserMysqlV57
+        (userPasswordOption | userLockOption)*
+        (COMMENT STRING_LITERAL | ATTRIBUTE STRING_LITERAL)?        #alterUserMysqlV80
+    | ALTER USER ifExists?
+      (userName | uid) DEFAULT ROLE roleOption                      #alterUserMysqlV80
     ;
 
 createUser
     : CREATE USER userAuthOption (',' userAuthOption)*              #createUserMysqlV56
     | CREATE USER ifNotExists?
         userAuthOption (',' userAuthOption)*
+        (DEFAULT ROLE roleOption)?
         (
           REQUIRE
           (tlsNone=NONE | tlsOption (AND? tlsOption)* )
         )?
         (WITH userResourceOption+)?
-        (userPasswordOption | userLockOption)*                      #createUserMysqlV57
+        (userPasswordOption | userLockOption)*
+        (COMMENT STRING_LITERAL |  ATTRIBUTE STRING_LITERAL)?       #createUserMysqlV80
     ;
 
 dropUser
@@ -1569,7 +1726,7 @@ revokeStatement
       FROM userName (',' userName)*                                 #detailRevoke
     | REVOKE ALL PRIVILEGES? ',' GRANT OPTION
       FROM userName (',' userName)*                                 #shortRevoke
-    | REVOKE uid (',' uid)*
+    | REVOKE (userName | uid) (',' (userName | uid))*
       FROM (userName | uid) (',' (userName | uid))*                 #roleRevoke
     ;
 
@@ -1591,17 +1748,21 @@ userSpecification
 
 userAuthOption
     : userName IDENTIFIED BY PASSWORD hashed=STRING_LITERAL         #hashAuthOption
-    | userName
-      IDENTIFIED BY STRING_LITERAL (RETAIN CURRENT PASSWORD)?       #stringAuthOption
-    | userName
-      IDENTIFIED (WITH | VIA)                                       // VIA and OR are MariaDB only
-      authenticationRule (OR authenticationRule)*                   #moduleAuthOption
+    | userName IDENTIFIED BY RANDOM PASSWORD authOptionClause       #randomAuthOption
+    | userName IDENTIFIED BY STRING_LITERAL authOptionClause        #stringAuthOption
+    | userName IDENTIFIED (WITH | VIA)                              // VIA is MariaDB-specific only
+      authenticationRule (OR authenticationRule)*                   #moduleAuthOption // OR is MariaDB-specific only
     | userName                                                      #simpleAuthOption
+    ;
+
+authOptionClause
+    : (REPLACE STRING_LITERAL)? (RETAIN CURRENT PASSWORD)?
     ;
 
 authenticationRule
     : authPlugin
-      ((BY | USING | AS) STRING_LITERAL)?                           #module
+      ((BY | USING | AS) (STRING_LITERAL | RANDOM PASSWORD)
+      authOptionClause)?                                            #module
     | authPlugin
       (USING | AS) passwordFunctionClause                           #passwordModuleOption // MariaDB
     ;
@@ -1647,23 +1808,33 @@ privilege
     | ALTER ROUTINE?
     | CREATE
       (TEMPORARY TABLES | ROUTINE | VIEW | USER | TABLESPACE | ROLE)?
-    | DELETE | DROP (ROLE)? | EVENT | EXECUTE | FILE | GRANT OPTION
+    | DELETE (HISTORY)? | DROP (ROLE)? | EVENT | EXECUTE | FILE | GRANT OPTION    // HISTORY is MariaDB-specific
     | INDEX | INSERT | LOCK TABLES | PROCESS | PROXY
     | REFERENCES | RELOAD
-    | REPLICATION (CLIENT | SLAVE | REPLICA)     // REPLICA is MariaDB-specific
+    | REPLICATION (CLIENT | SLAVE | REPLICA | MASTER) ADMIN?     // REPLICA is MariaDB-specific
     | SELECT
-    | SHOW (VIEW | DATABASES)
+    | SHOW (VIEW | DATABASES | SCHEMAS)
     | SHUTDOWN | SUPER | TRIGGER | UPDATE | USAGE
-    | APPLICATION_PASSWORD_ADMIN | AUDIT_ADMIN | BACKUP_ADMIN | BINLOG_ADMIN | BINLOG_ENCRYPTION_ADMIN | CLONE_ADMIN
-    | CONNECTION_ADMIN | ENCRYPTION_KEY_ADMIN | FIREWALL_ADMIN | FIREWALL_USER | FLUSH_OPTIMIZER_COSTS
-    | FLUSH_STATUS | FLUSH_TABLES | FLUSH_USER_RESOURCES | GROUP_REPLICATION_ADMIN
-    | INNODB_REDO_LOG_ARCHIVE | INNODB_REDO_LOG_ENABLE | NDB_STORED_USER | PERSIST_RO_VARIABLES_ADMIN | REPLICATION_APPLIER
+    | APPLICATION_PASSWORD_ADMIN | AUDIT_ABORT_EXEMPT | AUDIT_ADMIN | AUTHENTICATION_POLICY_ADMIN | BACKUP_ADMIN | BINLOG_ADMIN | BINLOG_ENCRYPTION_ADMIN | CLONE_ADMIN
+    | CONNECTION_ADMIN | ENCRYPTION_KEY_ADMIN | FIREWALL_ADMIN | FIREWALL_EXEMPT | FIREWALL_USER | FLUSH_OPTIMIZER_COSTS
+    | FLUSH_STATUS | FLUSH_TABLES | FLUSH_USER_RESOURCES | GROUP_REPLICATION_ADMIN | GROUP_REPLICATION_STREAM
+    | INNODB_REDO_LOG_ARCHIVE | INNODB_REDO_LOG_ENABLE | NDB_STORED_USER | PASSWORDLESS_USER_ADMIN | PERSIST_RO_VARIABLES_ADMIN | REPLICATION_APPLIER
     | REPLICATION_SLAVE_ADMIN | RESOURCE_GROUP_ADMIN | RESOURCE_GROUP_USER | ROLE_ADMIN
-    | SERVICE_CONNECTION_ADMIN
-    | SESSION_VARIABLES_ADMIN | SET_USER_ID | SHOW_ROUTINE | SYSTEM_USER | SYSTEM_VARIABLES_ADMIN
-    | TABLE_ENCRYPTION_ADMIN | VERSION_TOKEN_ADMIN | XA_RECOVER_ADMIN
+    | SENSITIVE_VARIABLES_OBSERVER | SERVICE_CONNECTION_ADMIN
+    | SESSION_VARIABLES_ADMIN | SET_USER_ID | SKIP_QUERY_REWRITE | SHOW_ROUTINE | SYSTEM_USER | SYSTEM_VARIABLES_ADMIN
+    | TABLE_ENCRYPTION_ADMIN | TELEMETRY_LOG_ADMIN | TP_CONNECTION_ADMIN | VERSION_TOKEN_ADMIN | XA_RECOVER_ADMIN
     // MariaDB
     | BINLOG_MONITOR | BINLOG_REPLAY | FEDERATED_ADMIN | READ_ONLY_ADMIN | REPLICATION_MASTER_ADMIN
+    | BINLOG (ADMIN | MONITOR | REPLAY) | FEDERATED ADMIN | (READ ONLY | READ_ONLY) ADMIN
+    | ADMIN OPTION
+    | CONNECTION ADMIN
+    | DELETE HISTORY | REPLICA MONITOR
+    | GRANT OPTION
+    | SET USER
+    | SLAVE MONITOR
+
+    // MySQL on Amazon RDS
+    | LOAD FROM S3 | SELECT INTO S3 | INVOKE LAMBDA
     ;
 
 privilegeLevel
@@ -1698,7 +1869,7 @@ checksumTable
 
 optimizeTable
     : OPTIMIZE actionOption=(NO_WRITE_TO_BINLOG | LOCAL)?
-      (TABLE | TABLES) tables
+      (TABLE | TABLES) tables waitNowaitClause?
     ;
 
 repairTable
@@ -1717,7 +1888,7 @@ checkTableOption
 //    Plugin and udf statements
 
 createUdfunction
-    : CREATE AGGREGATE? FUNCTION uid
+    : CREATE orReplace? AGGREGATE? FUNCTION ifNotExists? uid       // or replace is MariaDB-specific
       RETURNS returnType=(STRING | INTEGER | REAL | DECIMAL)
       SONAME STRING_LITERAL
     ;
@@ -1736,7 +1907,7 @@ uninstallPlugin
 setStatement
     : SET variableClause ('=' | ':=') (expression | ON)
       (',' variableClause ('=' | ':=') (expression | ON))*                      #setVariable
-    | SET (CHARACTER SET | CHARSET | CHAR SET) (charsetName | DEFAULT)          #setCharset
+    | SET charSet (charsetName | DEFAULT)          #setCharset
     | SET NAMES
         (charsetName (COLLATE collationName)? | DEFAULT)                        #setNames
     | setPasswordStatement                                                      #setPassword
@@ -1792,6 +1963,8 @@ showStatement
           rowCount=decimalLiteral
         )                                                           #showProfile
     | SHOW SLAVE STATUS (FOR CHANNEL STRING_LITERAL)?               #showSlaveStatus
+    // MariaDB userstat plugin
+    | SHOW (USER_STATISTICS | CLIENT_STATISTICS | INDEX_STATISTICS | TABLE_STATISTICS) # showUserstatPlugin
     ;
 
 // details
@@ -1842,11 +2015,14 @@ cacheIndexStatement
 flushStatement
     : FLUSH flushFormat=(NO_WRITE_TO_BINLOG | LOCAL)?
       flushOption (',' flushOption)*
+    // MariaDB userstat plugin
+    | FLUSH (USER_STATISTICS | CLIENT_STATISTICS | INDEX_STATISTICS | TABLE_STATISTICS)
+    // Specific for Azure Database for MySQL Single Server instance.
+    | FLUSH FIREWALL_RULES
     ;
 
 killStatement
-    : KILL connectionFormat=(CONNECTION | QUERY)?
-      decimalLiteral+
+    : KILL connectionFormat=(CONNECTION | QUERY)? expression
     ;
 
 loadIndexIntoCache
@@ -1880,8 +2056,7 @@ flushOption
         | USER_RESOURCES | TABLES (WITH READ LOCK)?
        )                                                            #simpleFlushOption
     | RELAY LOGS channelOption?                                     #channelFlushOption
-    | TABLES tables? flushTableOption?                              #tableFlushOption
-    | TABLE tables? flushTableOption?                               #tableFlushOption
+    | (TABLE | TABLES) tables? flushTableOption?                    #tableFlushOption
     ;
 
 flushTableOption
@@ -1996,20 +2171,28 @@ tableName
     ;
 
 roleName
-    : uid
+    : userName | uid
     ;
 
 fullColumnName
     : uid (dottedId dottedId? )?
-    | . dottedId dottedId?
+    | .? dottedId dottedId?
     ;
 
 indexColumnName
     : ((uid | STRING_LITERAL) ('(' decimalLiteral ')')? | expression) sortType=(ASC | DESC)?
     ;
 
+simpleUserName
+    : STRING_LITERAL
+    | ID
+    | ADMIN
+    | keywordsCanBeId;
+hostName: (LOCAL_ID | HOST_IP_ADDRESS | '@' );
 userName
-    : STRING_USER_NAME | STRING_USER_NAME_MARIADB | ID | STRING_LITERAL | keywordsCanBeId;
+    : simpleUserName
+    | simpleUserName hostName
+    | currentUserExpression;
 
 mysqlVariable
     : LOCAL_ID
@@ -2027,12 +2210,14 @@ collationName
     : uid | STRING_LITERAL;
 
 engineName
-    : ARCHIVE | BLACKHOLE | CSV | FEDERATED | INNODB | MEMORY
-    | MRG_MYISAM | MYISAM | NDB | NDBCLUSTER | PERFORMANCE_SCHEMA
-    | TOKUDB
+    : engineNameBase
     | ID
-    | STRING_LITERAL | REVERSE_QUOTE_ID
-    | CONNECT
+    | STRING_LITERAL
+    ;
+
+engineNameBase
+    : ARCHIVE | BLACKHOLE | CONNECT | CSV | FEDERATED | INNODB | MEMORY
+    | MRG_MYISAM | MYISAM | NDB | NDBCLUSTER | PERFORMANCE_SCHEMA | TOKUDB
     ;
 
 // MariaDB
@@ -2068,20 +2253,21 @@ authPlugin
 uid
     : simpleId
     //| DOUBLE_QUOTE_ID
-    | REVERSE_QUOTE_ID
+    //| REVERSE_QUOTE_ID
     | CHARSET_REVERSE_QOUTE_STRING
+    | STRING_LITERAL
     ;
 
 simpleId
     : ID
     | charsetNameBase
     | transactionLevelBase
-    | engineName
+    | engineNameBase
     | privilegesBase
     | intervalTypeBase
     | dataTypeBase
     | keywordsCanBeId
-    | functionNameBase
+    | scalarFunctionName
     ;
 
 dottedId
@@ -2134,18 +2320,18 @@ constant
 dataType
     : typeName=(
       CHAR | CHARACTER | VARCHAR | TINYTEXT | TEXT | MEDIUMTEXT | LONGTEXT
-       | NCHAR | NVARCHAR
+       | NCHAR | NVARCHAR | LONG
       )
       VARYING?
       lengthOneDimension? BINARY?
-      ((CHARACTER SET | CHARSET | CHAR SET) charsetName)?
+      (charSet charsetName)?
       (COLLATE collationName | BINARY)?                             #stringDataType
-    | NATIONAL typeName=(VARCHAR | CHARACTER)
+    | NATIONAL typeName=(CHAR | CHARACTER) VARYING
+      lengthOneDimension? BINARY?                                   #nationalVaryingStringDataType
+    | NATIONAL typeName=(VARCHAR | CHARACTER | CHAR)
       lengthOneDimension? BINARY?                                   #nationalStringDataType
     | NCHAR typeName=VARCHAR
       lengthOneDimension? BINARY?                                   #nationalStringDataType
-    | NATIONAL typeName=(CHAR | CHARACTER) VARYING
-      lengthOneDimension? BINARY?                                   #nationalVaryingStringDataType
     | typeName=(
         TINYINT | SMALLINT | MEDIUMINT | INT | INTEGER | BIGINT
         | MIDDLEINT | INT1 | INT2 | INT3 | INT4 | INT8
@@ -2158,7 +2344,7 @@ dataType
     | typeName=(DECIMAL | DEC | FIXED | NUMERIC | FLOAT | FLOAT4 | FLOAT8)
       lengthTwoOptionalDimension? (SIGNED | UNSIGNED | ZEROFILL)*   #dimensionDataType
     | typeName=(
-        DATE | TINYBLOB |  MEDIUMBLOB | LONGBLOB
+        DATE | TINYBLOB | MEDIUMBLOB | LONGBLOB
         | BOOL | BOOLEAN | SERIAL
       )                                                             #simpleDataType
     | typeName=(
@@ -2168,16 +2354,17 @@ dataType
       lengthOneDimension?                                           #dimensionDataType
     | typeName=(ENUM | SET)
       collectionOptions BINARY?
-      ((CHARACTER SET | CHARSET | CHAR SET) charsetName)?           #collectionDataType
+      (charSet charsetName)?                                        #collectionDataType
     | typeName=(
         GEOMETRYCOLLECTION | GEOMCOLLECTION | LINESTRING | MULTILINESTRING
         | MULTIPOINT | MULTIPOLYGON | POINT | POLYGON | JSON | GEOMETRY
-      )                                                             #spatialDataType
+      ) (SRID decimalLiteral)?                                      #spatialDataType
     | typeName=LONG VARCHAR?
       BINARY?
-      ((CHARACTER SET | CHARSET | CHAR SET) charsetName)?
+      (charSet charsetName)?
       (COLLATE collationName)?                                      #longVarcharDataType    // LONG VARCHAR is the same as LONG
     | LONG VARBINARY                                                #longVarbinaryDataType
+    | UUID                                                          #uuidDataType // MariaDB-specific only
     ;
 
 collectionOptions
@@ -2191,11 +2378,11 @@ collectionOption
 convertedDataType
     :
     (
-      typeName=(BINARY| NCHAR) lengthOneDimension?
-      | typeName=CHAR lengthOneDimension? ((CHARACTER SET | CHARSET | CHAR SET) charsetName)?
-      | typeName=(DATE | DATETIME | TIME | JSON | INT | INTEGER)
-      | typeName=DECIMAL lengthTwoOptionalDimension?
-      | (SIGNED | UNSIGNED) INTEGER?
+      typeName=(BINARY | NCHAR | FLOAT) lengthOneDimension?
+      | typeName=CHAR lengthOneDimension? (charSet charsetName)?
+      | typeName=(DATE | DATETIME | TIME | YEAR | JSON | INT | INTEGER | DOUBLE)
+      | typeName=(DECIMAL | DEC) lengthTwoOptionalDimension?
+      | (SIGNED | UNSIGNED) (INTEGER | INT)?
     ) ARRAY?
     ;
 
@@ -2216,6 +2403,10 @@ lengthTwoOptionalDimension
 
 uidList
     : uid (',' uid)*
+    ;
+
+fullColumnNameList
+    : fullColumnName (',' fullColumnName)*
     ;
 
 tables
@@ -2257,6 +2448,7 @@ defaultValue
     | '(' expression ')'
     | (LASTVAL | NEXTVAL) '(' fullId ')' // MariaDB
     | '(' (PREVIOUS | NEXT) VALUE FOR fullId ')' // MariaDB
+    | expression // MariaDB
     ;
 
 currentTimestamp
@@ -2274,11 +2466,28 @@ expressionOrDefault
     ;
 
 ifExists
-    : IF EXISTS;
+    : IF EXISTS
+    ;
+
+// Mariadb-specific
 
 ifNotExists
-    : IF NOT EXISTS;
+    : IF NOT EXISTS
+    ;
 
+orReplace
+    : OR REPLACE
+    ;
+
+waitNowaitClause
+    : WAIT decimalLiteral
+    | NOWAIT
+    ;
+
+lockOption
+    : waitNowaitClause
+    | SKIP_ LOCKED
+    ;
 
 //    Functions
 
@@ -2294,15 +2503,16 @@ functionCall
 specificFunction
     : (
       CURRENT_DATE | CURRENT_TIME | CURRENT_TIMESTAMP
-      | CURDATE | CURTIME   // MariaDB-specific
-      | CURRENT_USER | LOCALTIME | UTC_TIMESTAMP | SCHEMA
+      | CURDATE | CURTIME                                           // MariaDB-specific only
+      | LOCALTIME | UTC_TIMESTAMP | SCHEMA
       ) ('(' ')')?                                                  #simpleFunctionCall
+    | currentUserExpression                                         #currentUser
     | CONVERT '(' expression separator=',' convertedDataType ')'    #dataTypeFunctionCall
     | CONVERT '(' expression USING charsetName ')'                  #dataTypeFunctionCall
     | CAST '(' expression AS convertedDataType ')'                  #dataTypeFunctionCall
     | VALUES '(' fullColumnName ')'                                 #valuesFunctionCall
     | CASE expression caseFuncAlternative+
-      (ELSE elseArg=functionArg)? END                               #caseFunctionCall
+      (ELSE elseArg=functionArg)? END                               #caseExpressionFunctionCall
     | CASE caseFuncAlternative+
       (ELSE elseArg=functionArg)? END                               #caseFunctionCall
     | CHAR '(' functionArgs  (USING charsetName)? ')'               #charFunctionCall
@@ -2385,8 +2595,8 @@ specificFunction
       '(' expression
        ',' expression
          (RETURNING convertedDataType)?
-         ((NULL_LITERAL | ERROR | (DEFAULT defaultValue)) ON EMPTY)?
-         ((NULL_LITERAL | ERROR | (DEFAULT defaultValue)) ON ERROR)?
+         jsonOnEmpty?
+         jsonOnError?
        ')'                                                          #jsonValueFunctionCall
     ;
 
@@ -2475,7 +2685,7 @@ scalarFunctionName
     | ASCII | CURDATE | CURRENT_DATE | CURRENT_TIME
     | CURRENT_TIMESTAMP | CURTIME | DATE_ADD | DATE_SUB
     | IF | INSERT | LOCALTIME | LOCALTIMESTAMP | MID | NOW
-    | REPLACE | SUBSTR | SUBSTRING | SYSDATE | TRIM
+    | REPEAT | REPLACE | SUBSTR | SUBSTRING | SYSDATE | TRIM
     | UTC_DATE | UTC_TIME | UTC_TIMESTAMP
     ;
 
@@ -2509,15 +2719,15 @@ expression
 predicate
     : predicate NOT? IN '(' (selectStatement | expressions) ')'     #inPredicate
     | predicate IS nullNotnull                                      #isNullPredicate
-    | left=predicate comparisonOperator right=predicate             #binaryComparasionPredicate
+    | left=predicate comparisonOperator right=predicate             #binaryComparisonPredicate
     | predicate comparisonOperator
-      quantifier=(ALL | ANY | SOME) '(' selectStatement ')'         #subqueryComparasionPredicate
+      quantifier=(ALL | ANY | SOME) '(' selectStatement ')'         #subqueryComparisonPredicate
     | predicate NOT? BETWEEN predicate AND predicate                #betweenPredicate
     | predicate SOUNDS LIKE predicate                               #soundsLikePredicate
     | predicate NOT? LIKE predicate (ESCAPE STRING_LITERAL)?        #likePredicate
     | predicate NOT? regex=(REGEXP | RLIKE) predicate               #regexpPredicate
-    | (LOCAL_ID VAR_ASSIGN)? expressionAtom                         #expressionAtomPredicate
     | predicate MEMBER OF '(' predicate ')'                         #jsonMemberOfPredicate
+    | expressionAtom                                                #expressionAtomPredicate
     ;
 
 
@@ -2530,13 +2740,15 @@ expressionAtom
     | mysqlVariable                                                 #mysqlVariableExpressionAtom
     | unaryOperator expressionAtom                                  #unaryExpressionAtom
     | BINARY expressionAtom                                         #binaryExpressionAtom
+    | LOCAL_ID VAR_ASSIGN expressionAtom                            #variableAssignExpressionAtom
     | '(' expression (',' expression)* ')'                          #nestedExpressionAtom
     | ROW '(' expression (',' expression)+ ')'                      #nestedRowExpressionAtom
-    | EXISTS '(' selectStatement ')'                                #existsExpessionAtom
-    | '(' selectStatement ')'                                       #subqueryExpessionAtom
+    | EXISTS '(' selectStatement ')'                                #existsExpressionAtom
+    | '(' selectStatement ')'                                       #subqueryExpressionAtom
     | INTERVAL expression intervalType                              #intervalExpressionAtom
     | left=expressionAtom bitOperator right=expressionAtom          #bitExpressionAtom
-    | left=expressionAtom mathOperator right=expressionAtom         #mathExpressionAtom
+    | left=expressionAtom multOperator right=expressionAtom         #mathExpressionAtom
+    | left=expressionAtom addOperator  right=expressionAtom         #mathExpressionAtom
     | left=expressionAtom jsonOperator right=expressionAtom         #jsonExpressionAtom
     ;
 
@@ -2557,8 +2769,12 @@ bitOperator
     : '<' '<' | '>' '>' | '&' | '^' | '|'
     ;
 
-mathOperator
-    : '*' | '/' | '%' | DIV | MOD | '+' | '-'
+multOperator
+    : '*' | '/' | '%' | DIV | MOD
+    ;
+
+addOperator
+    : '+' | '-'
     ;
 
 jsonOperator
@@ -2596,74 +2812,56 @@ dataTypeBase
     ;
 
 keywordsCanBeId
-    : ACCOUNT | ACTION | AFTER | AGGREGATE | ALGORITHM | ANY
-    | AT | ADMIN | AUDIT_ADMIN | AUTHORS | AUTOCOMMIT | AUTOEXTEND_SIZE
-    | AUTO_INCREMENT | AVG | AVG_ROW_LENGTH | BACKUP_ADMIN | BEGIN | BINLOG | BINLOG_ADMIN | BINLOG_ENCRYPTION_ADMIN | BIT | BIT_AND | BIT_OR | BIT_XOR
-    | BLOCK | BOOL | BOOLEAN | BTREE | CACHE | CASCADED | CHAIN | CHANGED
-    | CHANNEL | CHECKSUM | PAGE_CHECKSUM | CATALOG_NAME | CIPHER
-    | CLASS_ORIGIN | CLIENT | CLONE_ADMIN | CLOSE | CLUSTERING | COALESCE | CODE
-    | COLUMNS | COLUMN_FORMAT | COLUMN_NAME | COMMENT | COMMIT | COMPACT
-    | COMPLETION | COMPRESSED | COMPRESSION | CONCURRENT | CONDITION | CONNECT
-    | CONNECTION | CONNECTION_ADMIN | CONSISTENT | CONSTRAINT_CATALOG | CONSTRAINT_NAME
-    | CONSTRAINT_SCHEMA | CONTAINS | CONTEXT
-    | CONTRIBUTORS | COPY | COUNT | CPU | CURRENT | CURSOR_NAME
-    | DATA | DATAFILE | DEALLOCATE
-    | DEFAULT_AUTH | DEFINER | DELAY_KEY_WRITE | DES_KEY_FILE | DIAGNOSTICS | DIRECTORY
-    | DISABLE | DISCARD | DISK | DO | DUMPFILE | DUPLICATE
-    | DYNAMIC | ENABLE | ENCRYPTION | ENCRYPTION_KEY_ADMIN | END | ENDS | ENGINE | ENGINE_ATTRIBUTE | ENGINES
-    | ERROR | ERRORS | ESCAPE | EUR | EVEN | EVENT | EVENTS | EVERY | EXCEPT
-    | EXCHANGE | EXCLUSIVE | EXPIRE | EXPORT | EXTENDED | EXTENT_SIZE | FAILED_LOGIN_ATTEMPTS | FAST | FAULTS
-    | FIELDS | FILE_BLOCK_SIZE | FILTER | FIREWALL_ADMIN | FIREWALL_USER | FIRST | FIXED | FLUSH
-    | FOLLOWS | FOUND | FULL | FUNCTION | GENERAL | GLOBAL | GRANTS | GROUP | GROUP_CONCAT
-    | GROUP_REPLICATION | GROUP_REPLICATION_ADMIN | HANDLER | HASH | HELP | HISTORY | HOST | HOSTS | IDENTIFIED
-    | IGNORED | IGNORE_SERVER_IDS | IMPORT | INDEXES | INITIAL_SIZE | INNODB_REDO_LOG_ARCHIVE
-    | INPLACE | INSERT_METHOD | INSTALL | INSTANCE | INSTANT | INTERNAL | INVOKER | IO
-    | IO_THREAD | IPC | ISO | ISOLATION | ISSUER | JIS | JSON | KEY_BLOCK_SIZE
-    | LANGUAGE | LAST | LEAVES | LESS | LEVEL | LIST | LOCAL
-    | LOGFILE | LOGS | MASTER | MASTER_AUTO_POSITION
-    | MASTER_CONNECT_RETRY | MASTER_DELAY
-    | MASTER_HEARTBEAT_PERIOD | MASTER_HOST | MASTER_LOG_FILE
-    | MASTER_LOG_POS | MASTER_PASSWORD | MASTER_PORT
-    | MASTER_RETRY_COUNT | MASTER_SSL | MASTER_SSL_CA
-    | MASTER_SSL_CAPATH | MASTER_SSL_CERT | MASTER_SSL_CIPHER
-    | MASTER_SSL_CRL | MASTER_SSL_CRLPATH | MASTER_SSL_KEY
-    | MASTER_TLS_VERSION | MASTER_USER
-    | MAX_CONNECTIONS_PER_HOUR | MAX_QUERIES_PER_HOUR
-    | MAX | MAX_ROWS | MAX_SIZE | MAX_UPDATES_PER_HOUR
-    | MAX_USER_CONNECTIONS | MEDIUM | MEMBER | MEMORY | MERGE | MESSAGE_TEXT
-    | MID | MIGRATE
-    | MIN | MIN_ROWS | MODE | MODIFY | MUTEX | MYSQL | MYSQL_ERRNO | NAME | NAMES
-    | NCHAR | NDB_STORED_USER | NEVER | NEXT | NO | NOCOPY | NODEGROUP | NONE | NOWAIT | NUMBER | ODBC | OFFLINE | OFFSET
-    | OF | OJ | OLD_PASSWORD | ONE | ONLINE | ONLY | OPEN | OPTIMIZER_COSTS
-    | OPTIONAL | OPTIONS | ORDER | OWNER | PACK_KEYS | PAGE | PARSER | PARTIAL
-    | PARTITIONING | PARTITIONS | PASSWORD | PASSWORD_LOCK_TIME | PERSIST_RO_VARIABLES_ADMIN | PHASE | PLUGINS
-    | PLUGIN_DIR | PLUGIN | PORT | PRECEDES | PREPARE | PRESERVE | PREV
-    | PROCESSLIST | PROFILE | PROFILES | PROXY | QUERY | QUICK
-    | REBUILD | RECOVER | RECURSIVE | REDO_BUFFER_SIZE | REDUNDANT
-    | RELAY | RELAYLOG | RELAY_LOG_FILE | RELAY_LOG_POS | REMOVE
-    | REORGANIZE | REPAIR | REPLICATE_DO_DB | REPLICATE_DO_TABLE
-    | REPLICATE_IGNORE_DB | REPLICATE_IGNORE_TABLE
-    | REPLICATE_REWRITE_DB | REPLICATE_WILD_DO_TABLE
-    | REPLICATE_WILD_IGNORE_TABLE | REPLICATION | REPLICATION_APPLIER | REPLICATION_SLAVE_ADMIN | RESET
-    | RESOURCE_GROUP_ADMIN | RESOURCE_GROUP_USER | RESUME
-    | RETURNED_SQLSTATE | RETURNS | REUSE | ROLE | ROLE_ADMIN | ROLLBACK | ROLLUP | ROTATE | ROW | ROWS
-    | ROW_FORMAT | RTREE | SAVEPOINT | SCHEDULE | SCHEMA_NAME | SECURITY | SECONDARY_ENGINE_ATTRIBUTE | SERIAL | SERVER
-    | SESSION | SESSION_VARIABLES_ADMIN | SET_USER_ID | SHARE | SHARED | SHOW_ROUTINE | SIGNED | SIMPLE | SLAVE
-    | SLOW | SNAPSHOT | SOCKET | SOME | SONAME | SOUNDS | SOURCE
-    | SQL_AFTER_GTIDS | SQL_AFTER_MTS_GAPS | SQL_BEFORE_GTIDS
-    | SQL_BUFFER_RESULT | SQL_CACHE | SQL_NO_CACHE | SQL_THREAD
-    | STACKED | START | STARTS | STATS_AUTO_RECALC | STATS_PERSISTENT
-    | STATS_SAMPLE_PAGES | STATUS | STD | STDDEV | STDDEV_POP | STDDEV_SAMP | STOP | STORAGE | STRING
-    | SUBCLASS_ORIGIN | SUBJECT | SUBPARTITION | SUBPARTITIONS | SUM | SUSPEND | SWAPS
-    | SWITCHES | SYSTEM_VARIABLES_ADMIN | TABLE_NAME | TABLESPACE | TABLE_ENCRYPTION_ADMIN
-    | TEMPORARY | TEMPTABLE | THAN | TRADITIONAL
-    | TRANSACTION | TRANSACTIONAL | TRIGGERS | TRUNCATE | UNBOUNDED | UNDEFINED | UNDOFILE
-    | UNDO_BUFFER_SIZE | UNINSTALL | UNKNOWN | UNTIL | UPGRADE | USA | USER | USE_FRM | USER_RESOURCES
-    | VALIDATION | VALUE | VAR_POP | VAR_SAMP | VARIABLES | VARIANCE | VERSION_TOKEN_ADMIN | VIEW | WAIT | WARNINGS | WITHOUT
-    | WORK | WRAPPER | X509 | XA | XA_RECOVER_ADMIN | XML
-    // MariaDB
-    | VIA | LASTVAL | NEXTVAL | SETVAL | PREVIOUS | PERSISTENT | REPLICATION_MASTER_ADMIN | REPLICA | READ_ONLY_ADMIN | FEDERATED_ADMIN | BINLOG_MONITOR | BINLOG_REPLAY
-    | ENCRYPTED | ENCRYPTION_KEY_ID
+    : ACCOUNT | ACTION | ADMIN | AFTER | AGGREGATE | ALGORITHM | ANY | APPLICATION_PASSWORD_ADMIN | ARRAY | AT | AUDIT_ADMIN | AUDIT_ABORT_EXEMPT
+    | AUTHENTICATION_POLICY_ADMIN | AUTHORS | AUTOCOMMIT| AUTOEXTEND_SIZE | AUTO_INCREMENT | AVG | AVG_ROW_LENGTH | ATTRIBUTE
+    | BACKUP_ADMIN | BEGIN | BINLOG | BINLOG_ADMIN | BINLOG_ENCRYPTION_ADMIN | BIT | BIT_AND | BIT_OR | BIT_XOR | BLOCK | BOOL | BOOLEAN
+    | BTREE | BUCKETS | CACHE | CASCADED | CHAIN | CHANGED | CHANNEL | CHECKSUM | PAGE_CHECKSUM | CATALOG_NAME | CIPHER | CLASS_ORIGIN
+    | CLIENT | CLONE_ADMIN | CLOSE | CLUSTERING | COALESCE | CODE | COLUMNS | COLUMN_FORMAT | COLUMN_NAME | COMMENT | COMMIT
+    | COMPACT | COMPLETION | COMPRESSED | COMPRESSION | CONCURRENT | CONDITION | CONNECT | CONNECTION | CONNECTION_ADMIN
+    | CONSISTENT | CONSTRAINT_CATALOG | CONSTRAINT_NAME | CONSTRAINT_SCHEMA | CONTAINS | CONTEXT | CONTRIBUTORS
+    | COPY | COUNT | CPU | CURRENT | CURRENT_USER | CURSOR_NAME | DATA | DATAFILE | DEALLOCATE | DEFAULT | DEFAULT_AUTH
+    | DEFINER | DELAY_KEY_WRITE | DES_KEY_FILE | DIAGNOSTICS | DIRECTORY | DISABLE | DISCARD | DISK | DO | DUMPFILE
+    | DUPLICATE | DYNAMIC | EMPTY | ENABLE | ENCRYPTION | ENCRYPTION_KEY_ADMIN | END | ENDS | ENGINE | ENGINE_ATTRIBUTE
+    | ENGINES | ENFORCED | ERROR | ERRORS | ESCAPE | EUR | EVEN | EVENT | EVENTS | EVERY | EXCEPT | EXCHANGE | EXCLUSIVE | EXPIRE
+    | EXPORT | EXTENDED | EXTENT_SIZE | FAILED_LOGIN_ATTEMPTS | FAST | FAULTS | FIELDS | FILE_BLOCK_SIZE | FILTER
+    | FIREWALL_ADMIN | FIREWALL_EXEMPT | FIREWALL_USER | FIRST | FIXED | FLUSH | FLUSH_OPTIMIZER_COSTS | FLUSH_STATUS | FLUSH_TABLES
+    | FLUSH_USER_RESOURCES | FOLLOWS | FOUND | FULL | FUNCTION | GENERAL | GEOMETRY | GLOBAL | GRANTS | GROUP | GROUP_CONCAT
+    | GROUP_REPLICATION | GROUP_REPLICATION_ADMIN | GROUP_REPLICATION_STREAM | HANDLER | HASH | HELP | HISTORY | HOST | HOSTS | IDENTIFIED
+    | IGNORED | IGNORE_SERVER_IDS | IMPORT | INDEXES | INITIAL_SIZE | INNODB_REDO_LOG_ARCHIVE | INNODB_REDO_LOG_ENABLE | INPLACE
+    | INSERT_METHOD | INSTALL | INSTANCE | INSTANT | INTERNAL | INVOKE | INVOKER | IO | IO_THREAD | IPC | ISO | ISOLATION | ISSUER
+    | JIS | JSON | KEY_BLOCK_SIZE | LAMBDA | LANGUAGE | LAST | LATERAL | LEAVES | LESS | LEVEL | LIST | LOCAL | LOGFILE | LOGS
+    | MASTER | MASTER_AUTO_POSITION | MASTER_CONNECT_RETRY | MASTER_DELAY | MASTER_HEARTBEAT_PERIOD | MASTER_HOST | MASTER_LOG_FILE
+    | MASTER_LOG_POS | MASTER_PASSWORD | MASTER_PORT | MASTER_RETRY_COUNT | MASTER_SSL | MASTER_SSL_CA | MASTER_SSL_CAPATH
+    | MASTER_SSL_CERT | MASTER_SSL_CIPHER | MASTER_SSL_CRL | MASTER_SSL_CRLPATH | MASTER_SSL_KEY | MASTER_TLS_VERSION
+    | MASTER_USER | MAX_CONNECTIONS_PER_HOUR | MAX_QUERIES_PER_HOUR | MAX | MAX_ROWS | MAX_SIZE | MAX_UPDATES_PER_HOUR
+    | MAX_USER_CONNECTIONS | MEDIUM | MEMBER | MEMORY | MERGE | MESSAGE_TEXT | MID | MIGRATE | MIN | MIN_ROWS | MODE
+    | MODIFY | MUTEX | MYSQL | MYSQL_ERRNO | NAME | NAMES | NATIONAL | NCHAR | NDB_STORED_USER | NESTED | NEVER | NEXT | NO
+    | NOCOPY | NODEGROUP | NONE | NOWAIT | NUMBER | ODBC | OFFLINE | OFFSET | OF | OJ | OLD_PASSWORD | ONE | ONLINE
+    | ONLY | OPEN | OPTIMIZER_COSTS | OPTIONAL | OPTIONS | ORDER | ORDINALITY | OWNER | PACK_KEYS | PAGE | PARSER
+    | PARTIAL | PARTITIONING | PARTITIONS | PASSWORD | PASSWORDLESS_USER_ADMIN | PASSWORD_LOCK_TIME | PATH
+    | PERSIST_RO_VARIABLES_ADMIN | PHASE | PLUGINS | PLUGIN_DIR | PLUGIN | PORT | PRECEDES | PREPARE | PRESERVE | PREV
+    | PRIMARY | PROCESSLIST | PROFILE | PROFILES | PROXY | QUERY | QUICK | REBUILD | RECOVER | RECURSIVE
+    | REDO_BUFFER_SIZE | REDUNDANT | RELAY | RELAYLOG | RELAY_LOG_FILE | RELAY_LOG_POS | REMOVE | REORGANIZE | REPAIR
+    | REPLICATE_DO_DB | REPLICATE_DO_TABLE | REPLICATE_IGNORE_DB | REPLICATE_IGNORE_TABLE | REPLICATE_REWRITE_DB
+    | REPLICATE_WILD_DO_TABLE | REPLICATE_WILD_IGNORE_TABLE | REPLICATION | REPLICATION_APPLIER
+    | REPLICATION_SLAVE_ADMIN | RESET | RESOURCE_GROUP_ADMIN | RESOURCE_GROUP_USER | RESUME | RETURNED_SQLSTATE
+    | RETURNING | RETURNS | REUSE | ROLE | ROLE_ADMIN | ROLLBACK | ROLLUP | ROTATE | ROW | ROWS | ROW_FORMAT | RTREE | S3
+    | SAVEPOINT | SCHEDULE | SCHEMA_NAME | SECURITY | SECONDARY_ENGINE_ATTRIBUTE | SENSITIVE_VARIABLES_OBSERVER | SERIAL | SERVER | SESSION
+    | SESSION_VARIABLES_ADMIN | SET_USER_ID | SHARE | SHARED | SHOW_ROUTINE | SIGNED | SIMPLE | SLAVE | SLOW | SKIP_QUERY_REWRITE
+    | SNAPSHOT | SOCKET | SOME | SONAME | SOUNDS | SOURCE | SQL_AFTER_GTIDS | SQL_AFTER_MTS_GAPS | SQL_BEFORE_GTIDS
+    | SQL_BUFFER_RESULT | SQL_CACHE | SQL_NO_CACHE | SQL_THREAD | STACKED | START | STARTS | STATS_AUTO_RECALC
+    | STATS_PERSISTENT | STATS_SAMPLE_PAGES | STATUS | STD | STDDEV | STDDEV_POP | STDDEV_SAMP | STOP | STORAGE | STRING
+    | SUBCLASS_ORIGIN | SUBJECT | SUBPARTITION | SUBPARTITIONS | SUM | SUSPEND | SWAPS | SWITCHES
+    | SYSTEM_VARIABLES_ADMIN | SYSTEM_USER | SYSTEM | TABLE_NAME | TABLESPACE | TABLE_ENCRYPTION_ADMIN | TABLE_TYPE | TELEMETRY_LOG_ADMIN | TEMPORARY | TEMPTABLE
+    | THAN | TP_CONNECTION_ADMIN | TRADITIONAL | TRANSACTION | TRANSACTIONAL | TRIGGERS | TRUNCATE | UNBOUNDED | UNDEFINED | UNDOFILE
+    | UNDO_BUFFER_SIZE | UNINSTALL | UNKNOWN | UNTIL | UPGRADE | USA | USER | USE_FRM | USER_RESOURCES | VALIDATION
+    | VALUE | VAR_POP | VAR_SAMP | VARIABLES | VARIANCE | VERSIONING | VERSION_TOKEN_ADMIN | VIEW | VIRTUAL | WAIT | WARNINGS
+    | WITHOUT | WORK | WRAPPER | X509 | XA | XA_RECOVER_ADMIN | XML | YES
+    // MariaDB-specific only
+    | BINLOG_MONITOR | BINLOG_REPLAY | CURRENT_ROLE | CYCLE | ENCRYPTED | ENCRYPTION_KEY_ID | FEDERATED_ADMIN
+    | INCREMENT | LASTVAL | LOCKED | MAXVALUE | MINVALUE | NEXTVAL | NOCACHE | NOCYCLE | NOMAXVALUE | NOMINVALUE
+    | PERSISTENT | PREVIOUS | READ_ONLY_ADMIN | REPLICA | REPLICATION_MASTER_ADMIN | RESTART | SEQUENCE | SETVAL
+    | SKIP_ | STATEMENT | UUID | VIA | MONITOR | READ_ONLY| REPLAY | USER_STATISTICS | CLIENT_STATISTICS | INDEX_STATISTICS | TABLE_STATISTICS | FIREWALL_RULES
     ;
 
 functionNameBase
@@ -2711,9 +2909,9 @@ functionNameBase
     | OVERLAPS | PERCENT_RANK | PERIOD_ADD | PERIOD_DIFF | PI | POINT
     | POINTFROMTEXT | POINTFROMWKB | POINTN | POLYFROMTEXT
     | POLYFROMWKB | POLYGON | POLYGONFROMTEXT | POLYGONFROMWKB
-    | POSITION | POW | POWER | QUARTER | QUOTE | RADIANS | RAND | RANK
+    | POSITION | POW | POWER | QUARTER | QUOTE | RADIANS | RAND | RANDOM | RANK
     | RANDOM_BYTES | RELEASE_LOCK | REVERSE | RIGHT | ROUND
-    | ROW_COUNT | ROW_NUMBER | RPAD | RTRIM | SECOND | SEC_TO_TIME
+    | ROW_COUNT | ROW_NUMBER | RPAD | RTRIM | SCHEMA | SECOND | SEC_TO_TIME
     | SESSION_USER | SESSION_VARIABLES_ADMIN
     | SHA | SHA1 | SHA2 | SIGN | SIN | SLEEP
     | SOUNDEX | SQL_THREAD_WAIT_AFTER_GTIDS | SQRT | SRID

@@ -5,16 +5,22 @@
  */
 package io.debezium.connector.oracle;
 
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.fail;
 
+import java.io.File;
+import java.io.FileReader;
 import java.math.BigDecimal;
+import java.net.URL;
 import java.sql.Clob;
 import java.sql.NClob;
+import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.awaitility.Awaitility;
@@ -26,7 +32,10 @@ import org.junit.rules.TestRule;
 
 import io.debezium.config.Configuration;
 import io.debezium.connector.oracle.junit.SkipTestDependingOnAdapterNameRule;
+import io.debezium.connector.oracle.junit.SkipTestDependingOnStrategyRule;
+import io.debezium.connector.oracle.junit.SkipWhenAdapterNameIs;
 import io.debezium.connector.oracle.junit.SkipWhenAdapterNameIsNot;
+import io.debezium.connector.oracle.junit.SkipWhenLogMiningStrategyIs;
 import io.debezium.connector.oracle.logminer.processor.TransactionCommitConsumer;
 import io.debezium.connector.oracle.util.TestHelper;
 import io.debezium.data.Envelope;
@@ -36,11 +45,14 @@ import io.debezium.embedded.AbstractConnectorTest;
 import io.debezium.junit.logging.LogInterceptor;
 import io.debezium.util.Testing;
 
+import ch.qos.logback.classic.Level;
+
 /**
  * Integration tests for CLOB data type support.
  *
  * @author Chris Cranford
  */
+@SkipWhenLogMiningStrategyIs(value = SkipWhenLogMiningStrategyIs.Strategy.HYBRID, reason = "Hybrid does not support CLOB")
 public class OracleClobDataTypeIT extends AbstractConnectorTest {
 
     private static final String JSON_DATA = Testing.Files.readResourceAsString("data/test_lob_data.json");
@@ -48,6 +60,8 @@ public class OracleClobDataTypeIT extends AbstractConnectorTest {
 
     @Rule
     public final TestRule skipAdapterRule = new SkipTestDependingOnAdapterNameRule();
+    @Rule
+    public final TestRule skipStrategyRule = new SkipTestDependingOnStrategyRule();
 
     private OracleConnection connection;
 
@@ -58,7 +72,7 @@ public class OracleClobDataTypeIT extends AbstractConnectorTest {
 
         setConsumeTimeout(TestHelper.defaultMessageConsumerPollTimeout(), TimeUnit.SECONDS);
         initializeConnectorTestFramework();
-        Testing.Files.delete(TestHelper.DB_HISTORY_PATH);
+        Testing.Files.delete(TestHelper.SCHEMA_HISTORY_PATH);
     }
 
     @After
@@ -644,7 +658,6 @@ public class OracleClobDataTypeIT extends AbstractConnectorTest {
         // 2 deletes + 2 tombstones
         records = consumeRecordsByTopic(4);
         assertThat(records.recordsForTopic(topicName("CLOB_TEST"))).hasSize(4);
-        records.forEach(System.out::println);
 
         record = records.recordsForTopic(topicName("CLOB_TEST")).get(0);
         VerifyRecord.isValidDelete(record, "ID", 2);
@@ -1068,7 +1081,8 @@ public class OracleClobDataTypeIT extends AbstractConnectorTest {
     }
 
     @Test
-    @FixFor("DBZ-2948")
+    @FixFor({ "DBZ-2948", "DBZ-5773" })
+    @SkipWhenAdapterNameIs(value = SkipWhenAdapterNameIs.AdapterName.OLR, reason = "OpenLogReplicator does not differentiate between LOB operations")
     public void shouldNotStreamAnyChangesWhenLobEraseIsDetected() throws Exception {
         String ddl = "CREATE TABLE CLOB_TEST ("
                 + "ID numeric(9,0), "
@@ -1111,10 +1125,69 @@ public class OracleClobDataTypeIT extends AbstractConnectorTest {
                 "dbms_lob.erase(loc_c, amount, 1); end;");
 
         // Wait until the log has recorded the message.
-        // Wait until the log has recorded the message.
         Awaitility.await().atMost(Duration.ofMinutes(1))
                 .until(() -> logminerLogInterceptor.containsWarnMessage("LOB_ERASE for table")
                         || xstreamLogInterceptor.containsWarnMessage("LOB_ERASE for table"));
+        assertNoRecordsToConsume();
+    }
+
+    @Test
+    @FixFor({ "DBZ-2948", "DBZ-5773" })
+    @SkipWhenAdapterNameIsNot(value = SkipWhenAdapterNameIsNot.AdapterName.OLR, reason = "OpenLogReplicator does not differentiate between LOB operations")
+    public void shouldStreamChangesWhenLobEraseIsDetected() throws Exception {
+        String ddl = "CREATE TABLE CLOB_TEST ("
+                + "ID numeric(9,0), "
+                + "VAL_CLOB clob, "
+                + "primary key(id))";
+
+        connection.execute(ddl);
+        TestHelper.streamTable(connection, "debezium.clob_test");
+
+        Configuration config = TestHelper.defaultConfig()
+                .with(OracleConnectorConfig.TABLE_INCLUDE_LIST, "DEBEZIUM\\.CLOB_TEST")
+                .with(OracleConnectorConfig.LOB_ENABLED, true)
+                .build();
+
+        start(OracleConnector.class, config);
+        assertConnectorIsRunning();
+        waitForSnapshotToBeCompleted(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+        // Insert record
+        Clob clob1 = createClob(part(JSON_DATA, 0, 24000));
+        connection.prepareQuery("INSERT INTO debezium.clob_test values (1, ?)", p -> p.setClob(1, clob1), null);
+        connection.commit();
+
+        SourceRecords records = consumeRecordsByTopic(1);
+        assertThat(records.recordsForTopic(topicName("CLOB_TEST"))).hasSize(1);
+
+        SourceRecord record = records.recordsForTopic(topicName("CLOB_TEST")).get(0);
+        VerifyRecord.isValidInsert(record, "ID", 1);
+
+        Struct after = after(record);
+        assertThat(after.get("ID")).isEqualTo(1);
+        assertThat(after.get("VAL_CLOB")).isEqualTo(getClobString(clob1));
+
+        // Execute LOB_ERASE
+        connection.execute("DECLARE loc_c CLOB; amount integer; BEGIN "
+                + "SELECT \"VAL_CLOB\" INTO loc_c FROM CLOB_TEST WHERE ID = 1 for update; "
+                + "amount := 10;"
+                + "dbms_lob.erase(loc_c, amount, 1); end;");
+
+        // Wait until the log has recorded the message.
+        records = consumeRecordsByTopic(1);
+        assertThat(records.recordsForTopic(topicName("CLOB_TEST"))).hasSize(1);
+
+        record = records.recordsForTopic(topicName("CLOB_TEST")).get(0);
+        VerifyRecord.isValidUpdate(record, "ID", 1);
+
+        Struct before = before(record);
+        assertThat(before.get("ID")).isEqualTo(1);
+        assertThat(before.get("VAL_CLOB")).isEqualTo(getUnavailableValuePlaceholder(config));
+
+        after = after(record);
+        assertThat(after.get("ID")).isEqualTo(1);
+        assertThat(after.get("VAL_CLOB")).isEqualTo(getUnavailableValuePlaceholder(config));
+
         assertNoRecordsToConsume();
     }
 
@@ -1499,12 +1572,12 @@ public class OracleClobDataTypeIT extends AbstractConnectorTest {
             SourceRecord record = table.get(0);
             Struct after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
             assertThat(after.get("ID")).isEqualTo(1);
-            assertThat(after.get("DATA")).isNull();
+            assertThat(after.get("DATA")).isEqualTo(getUnavailableValuePlaceholder(config));
 
             record = table.get(1);
             after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
             assertThat(after.get("ID")).isEqualTo(2);
-            assertThat(after.get("DATA")).isNull();
+            assertThat(after.get("DATA")).isEqualTo(getUnavailableValuePlaceholder(config));
 
             // Small data and large data
             connection.executeWithoutCommitting("INSERT INTO dbz3645 (id,data) values (3,'Test3')");
@@ -1644,7 +1717,6 @@ public class OracleClobDataTypeIT extends AbstractConnectorTest {
             // but not merged since event merging happens only when LOB is enabled. Xstream handles
             // this automatically hence the reason why it has 1 less event in the stream.
             sourceRecords = consumeRecordsByTopic(logMinerAdapter ? 4 : 3);
-            sourceRecords.allRecordsInOrder().forEach(System.out::println);
             table = sourceRecords.recordsForTopic(topicName("DBZ3645"));
             VerifyRecord.isValidDelete(table.get(0), "ID", 5);
             VerifyRecord.isValidTombstone(table.get(1), "ID", 5);
@@ -1964,6 +2036,691 @@ public class OracleClobDataTypeIT extends AbstractConnectorTest {
         assertThat(after.get("VAL_NCLOB")).isEqualTo(getClobString(nclob1));
         assertThat(after.get("VAL_USERNAME")).isEqualTo("This will be fixed soon so please don't worry, she wrote.");
         assertThat(after.get("VAL_DATA")).isEqualTo("2\"'\" sd f\"\"\" '''' ''");
+    }
+
+    @Test
+    @FixFor("DBZ-5266")
+    @SkipWhenAdapterNameIsNot(value = SkipWhenAdapterNameIsNot.AdapterName.LOGMINER, reason = "Commit SCN is only applicable to LogMiner")
+    public void shouldUpdateCommitScnOnLobTransaction() throws Exception {
+        TestHelper.dropTable(connection, "dbz5266");
+        try {
+            connection.execute("create table dbz5266 (data clob)");
+            TestHelper.streamTable(connection, "dbz5266");
+
+            Configuration config = TestHelper.defaultConfig()
+                    .with(OracleConnectorConfig.TABLE_INCLUDE_LIST, "DEBEZIUM\\.DBZ5266")
+                    .with(OracleConnectorConfig.LOB_ENABLED, true)
+                    .build();
+
+            start(OracleConnector.class, config);
+            assertConnectorIsRunning();
+
+            waitForStreamingRunning(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+            final String query = "INSERT INTO dbz5266 values (?)";
+            try (PreparedStatement ps = connection.connection().prepareStatement(query)) {
+                final URL resource = getClass().getClassLoader().getResource("data/test_lob_data.json");
+                final File file = new File(resource.toURI());
+                ps.setCharacterStream(1, new FileReader(file), file.length());
+                ps.addBatch();
+                ps.executeBatch();
+                connection.commit();
+            }
+            catch (Exception e) {
+                fail("Insert of clob data failed to happen", e);
+            }
+
+            SourceRecords records = consumeRecordsByTopic(1);
+
+            List<SourceRecord> tableRecords = records.recordsForTopic("server1.DEBEZIUM.DBZ5266");
+            assertThat(tableRecords).hasSize(1);
+
+            Struct after = ((Struct) tableRecords.get(0).value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after.get("DATA")).isNotNull();
+
+            Struct source = ((Struct) tableRecords.get(0).value()).getStruct("source");
+            assertThat(source.get(SourceInfo.SCN_KEY)).isNotNull();
+            assertThat(source.get(SourceInfo.COMMIT_SCN_KEY)).isNotNull();
+
+            final String commitScn = source.getString(SourceInfo.COMMIT_SCN_KEY);
+            final String scn = source.getString(SourceInfo.SCN_KEY);
+            assertThat(Scn.valueOf(commitScn).longValue()).isGreaterThanOrEqualTo(Scn.valueOf(scn).longValue());
+        }
+        finally {
+            TestHelper.dropTable(connection, "dbz5266");
+        }
+    }
+
+    @Test
+    @FixFor("DBZ-5266")
+    @SkipWhenAdapterNameIsNot(value = SkipWhenAdapterNameIsNot.AdapterName.LOGMINER, reason = "Commit SCN is only applicable to LogMiner")
+    public void shouldUpdateCommitScnOnNonLobTransactionWithLobEnabled() throws Exception {
+        TestHelper.dropTable(connection, "dbz5266");
+        try {
+            connection.execute("create table dbz5266 (data varchar2(50))");
+            TestHelper.streamTable(connection, "dbz5266");
+
+            Configuration config = TestHelper.defaultConfig()
+                    .with(OracleConnectorConfig.TABLE_INCLUDE_LIST, "DEBEZIUM\\.DBZ5266")
+                    .with(OracleConnectorConfig.LOB_ENABLED, true)
+                    .build();
+
+            start(OracleConnector.class, config);
+            assertConnectorIsRunning();
+
+            waitForStreamingRunning(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+            connection.execute("INSERT INTO dbz5266 values ('test')");
+
+            SourceRecords records = consumeRecordsByTopic(1);
+
+            List<SourceRecord> tableRecords = records.recordsForTopic("server1.DEBEZIUM.DBZ5266");
+            assertThat(tableRecords).hasSize(1);
+
+            Struct after = ((Struct) tableRecords.get(0).value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after.get("DATA")).isNotNull();
+
+            Struct source = ((Struct) tableRecords.get(0).value()).getStruct("source");
+            assertThat(source.get(SourceInfo.SCN_KEY)).isNotNull();
+            assertThat(source.get(SourceInfo.COMMIT_SCN_KEY)).isNotNull();
+
+            final String commitScn = source.getString(SourceInfo.COMMIT_SCN_KEY);
+            final String scn = source.getString(SourceInfo.SCN_KEY);
+            assertThat(Scn.valueOf(commitScn).longValue()).isGreaterThanOrEqualTo(Scn.valueOf(scn).longValue());
+        }
+        finally {
+            TestHelper.dropTable(connection, "dbz5266");
+        }
+    }
+
+    @Test
+    @FixFor("DBZ-5266")
+    @SkipWhenAdapterNameIsNot(value = SkipWhenAdapterNameIsNot.AdapterName.LOGMINER, reason = "Commit SCN is only applicable to LogMiner")
+    public void shouldUpdateCommitScnOnNonLobTransactionWithLobDisabled() throws Exception {
+        TestHelper.dropTable(connection, "dbz5266");
+        try {
+            connection.execute("create table dbz5266 (data varchar2(50))");
+            TestHelper.streamTable(connection, "dbz5266");
+
+            Configuration config = TestHelper.defaultConfig()
+                    .with(OracleConnectorConfig.TABLE_INCLUDE_LIST, "DEBEZIUM\\.DBZ5266")
+                    .with(OracleConnectorConfig.LOB_ENABLED, false)
+                    .build();
+
+            start(OracleConnector.class, config);
+            assertConnectorIsRunning();
+
+            waitForStreamingRunning(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+            connection.execute("INSERT INTO dbz5266 values ('test')");
+
+            SourceRecords records = consumeRecordsByTopic(1);
+
+            List<SourceRecord> tableRecords = records.recordsForTopic("server1.DEBEZIUM.DBZ5266");
+            assertThat(tableRecords).hasSize(1);
+
+            Struct after = ((Struct) tableRecords.get(0).value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after.get("DATA")).isNotNull();
+
+            Struct source = ((Struct) tableRecords.get(0).value()).getStruct("source");
+            assertThat(source.get(SourceInfo.SCN_KEY)).isNotNull();
+            assertThat(source.get(SourceInfo.COMMIT_SCN_KEY)).isNotNull();
+
+            final String commitScn = source.getString(SourceInfo.COMMIT_SCN_KEY);
+            final String scn = source.getString(SourceInfo.SCN_KEY);
+            assertThat(Scn.valueOf(commitScn).longValue()).isGreaterThanOrEqualTo(Scn.valueOf(scn).longValue());
+        }
+        finally {
+            TestHelper.dropTable(connection, "dbz5266");
+        }
+    }
+
+    @Test
+    @FixFor("DBZ-5295")
+    public void shouldReselectClobAfterPrimaryKeyChange() throws Exception {
+        TestHelper.dropTable(connection, "dbz5295");
+        try {
+            final LogInterceptor logInterceptor = new LogInterceptor(BaseChangeRecordEmitter.class);
+            logInterceptor.setLoggerLevel(BaseChangeRecordEmitter.class, Level.INFO);
+
+            connection.execute("create table dbz5295 (id numeric(9,0) primary key, data clob, data2 clob)");
+            TestHelper.streamTable(connection, "dbz5295");
+
+            connection.execute("INSERT INTO dbz5295 (id,data,data2) values (1,'Small clob data','Data2')");
+
+            Configuration config = TestHelper.defaultConfig()
+                    .with(OracleConnectorConfig.TABLE_INCLUDE_LIST, "DEBEZIUM\\.DBZ5295")
+                    .with(OracleConnectorConfig.LOB_ENABLED, true)
+                    .build();
+
+            start(OracleConnector.class, config);
+            assertConnectorIsRunning();
+
+            waitForStreamingRunning(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+            SourceRecords records = consumeRecordsByTopic(1);
+            List<SourceRecord> recordsForTopic = records.recordsForTopic(topicName("DBZ5295"));
+            assertThat(recordsForTopic).hasSize(1);
+
+            SourceRecord record = recordsForTopic.get(0);
+            Struct after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after.get("ID")).isEqualTo(1);
+            assertThat(after.get("DATA")).isEqualTo("Small clob data");
+            assertThat(after.get("DATA2")).isEqualTo("Data2");
+
+            connection.execute("UPDATE dbz5295 set id = 2 where id = 1");
+
+            // The update of the primary key causes a DELETE and a CREATE, mingled with a TOMBSTONE
+            records = consumeRecordsByTopic(3);
+            recordsForTopic = records.recordsForTopic(topicName("DBZ5295"));
+            assertThat(recordsForTopic).hasSize(3);
+
+            // First event: DELETE
+            record = recordsForTopic.get(0);
+            VerifyRecord.isValidDelete(record, "ID", 1);
+            after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after).isNull();
+
+            // Second event: TOMBSTONE
+            record = recordsForTopic.get(1);
+            VerifyRecord.isValidTombstone(record);
+
+            // Third event: CREATE
+            record = recordsForTopic.get(2);
+            VerifyRecord.isValidInsert(record, "ID", 2);
+            after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after.get("ID")).isEqualTo(2);
+            assertThat(after.get("DATA")).isEqualTo("Small clob data");
+            assertThat(after.get("DATA2")).isEqualTo("Data2");
+
+            assertThat(logInterceptor.containsMessage("re-selecting LOB columns [DATA, DATA2] out of bands")).isTrue();
+        }
+        finally {
+            TestHelper.dropTable(connection, "dbz5295");
+        }
+    }
+
+    @Test
+    @FixFor("DBZ-5295")
+    public void shouldReselectClobAfterPrimaryKeyChangeWithRowDeletion() throws Exception {
+        TestHelper.dropTable(connection, "dbz5295");
+        try {
+
+            final LogInterceptor logInterceptor = new LogInterceptor(BaseChangeRecordEmitter.class);
+            logInterceptor.setLoggerLevel(BaseChangeRecordEmitter.class, Level.INFO);
+
+            connection.execute("create table dbz5295 (id numeric(9,0) primary key, data clob, data2 clob)");
+            TestHelper.streamTable(connection, "dbz5295");
+
+            connection.execute("INSERT INTO dbz5295 (id,data,data2) values (1,'Small clob data','Data2')");
+
+            Configuration config = TestHelper.defaultConfig()
+                    .with(OracleConnectorConfig.TABLE_INCLUDE_LIST, "DEBEZIUM\\.DBZ5295")
+                    .with(OracleConnectorConfig.LOB_ENABLED, true)
+                    .build();
+
+            start(OracleConnector.class, config);
+            assertConnectorIsRunning();
+
+            waitForStreamingRunning(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+            SourceRecords records = consumeRecordsByTopic(1);
+            List<SourceRecord> recordsForTopic = records.recordsForTopic(topicName("DBZ5295"));
+            assertThat(recordsForTopic).hasSize(1);
+
+            SourceRecord record = recordsForTopic.get(0);
+            Struct after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after.get("ID")).isEqualTo(1);
+            assertThat(after.get("DATA")).isEqualTo("Small clob data");
+            assertThat(after.get("DATA2")).isEqualTo("Data2");
+
+            // Update the PK and then delete the row within the same transaction
+            connection.executeWithoutCommitting("UPDATE dbz5295 set id = 2 where id = 1");
+            connection.execute("DELETE FROM dbz5295 where id = 2");
+
+            // The update of the primary key causes a DELETE and a CREATE, mingled with a TOMBSTONE
+            records = consumeRecordsByTopic(4);
+            recordsForTopic = records.recordsForTopic(topicName("DBZ5295"));
+            assertThat(recordsForTopic).hasSize(4);
+
+            // First event: DELETE
+            record = recordsForTopic.get(0);
+            VerifyRecord.isValidDelete(record, "ID", 1);
+            after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after).isNull();
+
+            // Second event: TOMBSTONE
+            record = recordsForTopic.get(1);
+            VerifyRecord.isValidTombstone(record);
+
+            // Third event: CREATE
+            record = recordsForTopic.get(2);
+            VerifyRecord.isValidInsert(record, "ID", 2);
+            after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after.get("ID")).isEqualTo(2);
+            assertThat(after.get("DATA")).isEqualTo(getUnavailableValuePlaceholder(config));
+            assertThat(after.get("DATA2")).isEqualTo(getUnavailableValuePlaceholder(config));
+
+            // Fourth event: DELETE
+            record = recordsForTopic.get(3);
+            VerifyRecord.isValidDelete(record, "ID", 2);
+            Struct before = ((Struct) record.value()).getStruct(Envelope.FieldName.BEFORE);
+            assertThat(before.get("ID")).isEqualTo(2);
+            assertThat(before.get("DATA")).isEqualTo(getUnavailableValuePlaceholder(config));
+            assertThat(before.get("DATA2")).isEqualTo(getUnavailableValuePlaceholder(config));
+
+            assertThat(logInterceptor.containsMessage("re-selecting LOB columns [DATA, DATA2] out of bands")).isTrue();
+        }
+        finally {
+            TestHelper.dropTable(connection, "dbz5295");
+        }
+    }
+
+    @Test
+    @FixFor("DBZ-7456")
+    public void shouldNotReselectClobAfterPrimaryKeyChangeColumnExcluded() throws Exception {
+        TestHelper.dropTable(connection, "dbz7456");
+        try {
+            final LogInterceptor logInterceptor = new LogInterceptor(BaseChangeRecordEmitter.class);
+            logInterceptor.setLoggerLevel(BaseChangeRecordEmitter.class, Level.INFO);
+
+            connection.execute("create table dbz7456 (id numeric(9,0) primary key, data clob, data2 clob)");
+            TestHelper.streamTable(connection, "dbz7456");
+
+            connection.execute("INSERT INTO dbz7456 (id,data,data2) values (1,'Small clob data','Data2')");
+
+            Configuration config = TestHelper.defaultConfig()
+                    .with(OracleConnectorConfig.TABLE_INCLUDE_LIST, "DEBEZIUM\\.DBZ7456")
+                    .with(OracleConnectorConfig.LOB_ENABLED, true)
+                    .with(OracleConnectorConfig.COLUMN_EXCLUDE_LIST, "DEBEZIUM.DBZ7456.DATA,DEBEZIUM.DBZ7456.DATA2")
+                    .build();
+
+            start(OracleConnector.class, config);
+            assertConnectorIsRunning();
+
+            waitForStreamingRunning(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+            SourceRecords records = consumeRecordsByTopic(1);
+            List<SourceRecord> recordsForTopic = records.recordsForTopic(topicName("DBZ7456"));
+            assertThat(recordsForTopic).hasSize(1);
+
+            SourceRecord record = recordsForTopic.get(0);
+            Struct after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after.get("ID")).isEqualTo(1);
+            assertThat(after.schema().field("DATA")).isNull();
+            assertThat(after.schema().field("DATA2")).isNull();
+
+            connection.execute("UPDATE dbz7456 set id = 2 where id = 1");
+
+            // The update of the primary key causes a DELETE and a CREATE, mingled with a TOMBSTONE
+            records = consumeRecordsByTopic(3);
+            recordsForTopic = records.recordsForTopic(topicName("DBZ7456"));
+            assertThat(recordsForTopic).hasSize(3);
+
+            // First event: DELETE
+            record = recordsForTopic.get(0);
+            VerifyRecord.isValidDelete(record, "ID", 1);
+            after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after).isNull();
+
+            // Second event: TOMBSTONE
+            record = recordsForTopic.get(1);
+            VerifyRecord.isValidTombstone(record);
+
+            // Third event: CREATE
+            record = recordsForTopic.get(2);
+            VerifyRecord.isValidInsert(record, "ID", 2);
+            after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after.get("ID")).isEqualTo(2);
+            assertThat(after.schema().field("DATA")).isNull();
+            assertThat(after.schema().field("DATA2")).isNull();
+
+            assertThat(logInterceptor.containsMessage("re-selecting LOB columns [DATA, DATA2] out of bands")).isFalse();
+        }
+        finally {
+            TestHelper.dropTable(connection, "dbz7456");
+        }
+    }
+
+    @Test
+    @FixFor("DBZ-7456")
+    public void shouldNotReselectClobAfterPrimaryKeyChangeWithRowDeletionColumnExcluded() throws Exception {
+        TestHelper.dropTable(connection, "dbz7456");
+        try {
+
+            final LogInterceptor logInterceptor = new LogInterceptor(BaseChangeRecordEmitter.class);
+            logInterceptor.setLoggerLevel(BaseChangeRecordEmitter.class, Level.INFO);
+
+            connection.execute("create table dbz7456 (id numeric(9,0) primary key, data clob, data2 clob)");
+            TestHelper.streamTable(connection, "dbz7456");
+
+            connection.execute("INSERT INTO dbz7456 (id,data,data2) values (1,'Small clob data','Data2')");
+
+            Configuration config = TestHelper.defaultConfig()
+                    .with(OracleConnectorConfig.TABLE_INCLUDE_LIST, "DEBEZIUM\\.DBZ7456")
+                    .with(OracleConnectorConfig.LOB_ENABLED, true)
+                    .with(OracleConnectorConfig.COLUMN_EXCLUDE_LIST, "DEBEZIUM.DBZ7456.DATA,DEBEZIUM.DBZ7456.DATA2")
+                    .build();
+
+            start(OracleConnector.class, config);
+            assertConnectorIsRunning();
+
+            waitForStreamingRunning(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+            SourceRecords records = consumeRecordsByTopic(1);
+            List<SourceRecord> recordsForTopic = records.recordsForTopic(topicName("DBZ7456"));
+            assertThat(recordsForTopic).hasSize(1);
+
+            SourceRecord record = recordsForTopic.get(0);
+            Struct after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after.get("ID")).isEqualTo(1);
+            assertThat(after.schema().field("DATA")).isNull();
+            assertThat(after.schema().field("DATA2")).isNull();
+
+            // Update the PK and then delete the row within the same transaction
+            connection.executeWithoutCommitting("UPDATE dbz7456 set id = 2 where id = 1");
+            connection.execute("DELETE FROM dbz7456 where id = 2");
+
+            // The update of the primary key causes a DELETE and a CREATE, mingled with a TOMBSTONE
+            records = consumeRecordsByTopic(4);
+            recordsForTopic = records.recordsForTopic(topicName("DBZ7456"));
+            assertThat(recordsForTopic).hasSize(4);
+
+            // First event: DELETE
+            record = recordsForTopic.get(0);
+            VerifyRecord.isValidDelete(record, "ID", 1);
+            after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after).isNull();
+
+            // Second event: TOMBSTONE
+            record = recordsForTopic.get(1);
+            VerifyRecord.isValidTombstone(record);
+
+            // Third event: CREATE
+            record = recordsForTopic.get(2);
+            VerifyRecord.isValidInsert(record, "ID", 2);
+            after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after.get("ID")).isEqualTo(2);
+            assertThat(after.schema().field("DATA")).isNull();
+            assertThat(after.schema().field("DATA2")).isNull();
+
+            // Fourth event: DELETE
+            record = recordsForTopic.get(3);
+            VerifyRecord.isValidDelete(record, "ID", 2);
+            Struct before = ((Struct) record.value()).getStruct(Envelope.FieldName.BEFORE);
+            assertThat(before.get("ID")).isEqualTo(2);
+            assertThat(before.schema().field("DATA")).isNull();
+            assertThat(before.schema().field("DATA2")).isNull();
+
+            assertThat(logInterceptor.containsMessage("re-selecting LOB columns [DATA, DATA2] out of bands")).isFalse();
+        }
+        finally {
+            TestHelper.dropTable(connection, "dbz7456");
+        }
+    }
+
+    @Test
+    @FixFor("DBZ-5581")
+    public void testClobUnavailableValuePlaceholderUpdateOnlyOneClobColumn() throws Exception {
+        TestHelper.dropTable(connection, "dbz5581");
+        try {
+            connection.execute("create table dbz5581 (id numeric(9,0) primary key, a1 varchar2(200), a2 clob, a3 nclob, a4 varchar2(100))");
+            TestHelper.streamTable(connection, "dbz5581");
+
+            Configuration config = TestHelper.defaultConfig()
+                    .with(OracleConnectorConfig.TABLE_INCLUDE_LIST, "DEBEZIUM\\.DBZ5581")
+                    .with(OracleConnectorConfig.LOB_ENABLED, true)
+                    .build();
+
+            start(OracleConnector.class, config);
+            assertConnectorIsRunning();
+
+            waitForStreamingRunning(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+            final Clob a2 = createClob(part(JSON_DATA, 0, 4100));
+            final NClob a3 = createNClob(part(JSON_DATA2, 0, 4100));
+            connection.prepareQuery("INSERT into dbz5581 (id,a1,a2,a3,a4) values (1, 'lwmzVQd6r7', ?, ?, 'cuTVQV0OpK')", st -> {
+                st.setClob(1, a2);
+                st.setNClob(2, a3);
+            }, null);
+            connection.commit();
+
+            final Clob a2u = createClob(part(JSON_DATA, 1, 4101));
+            connection.prepareQuery("UPDATE dbz5581 set A2=? WHERE ID=1", st -> st.setClob(1, a2u), null);
+            connection.commit();
+
+            connection.execute("UPDATE dbz5581 set A2=NULL WHERE ID=1");
+
+            SourceRecords records = consumeRecordsByTopic(3);
+            List<SourceRecord> recordsForTopic = records.recordsForTopic("server1.DEBEZIUM.DBZ5581");
+            assertThat(recordsForTopic).hasSize(3);
+
+            SourceRecord record = recordsForTopic.get(0);
+            Struct after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after.get("ID")).isEqualTo(1);
+            assertThat(after.get("A1")).isEqualTo("lwmzVQd6r7");
+            assertThat(after.get("A2")).isEqualTo(getClobString(a2));
+            assertThat(after.get("A3")).isEqualTo(getClobString(a3));
+            assertThat(after.get("A4")).isEqualTo("cuTVQV0OpK");
+
+            record = recordsForTopic.get(1);
+            after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after.get("ID")).isEqualTo(1);
+            assertThat(after.get("A1")).isEqualTo("lwmzVQd6r7");
+            assertThat(after.get("A2")).isEqualTo(getClobString(a2u));
+            assertThat(after.get("A3")).isEqualTo(getUnavailableValuePlaceholder(config));
+            assertThat(after.get("A4")).isEqualTo("cuTVQV0OpK");
+
+            record = recordsForTopic.get(2);
+            after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after.get("ID")).isEqualTo(1);
+            assertThat(after.get("A1")).isEqualTo("lwmzVQd6r7");
+            assertThat(after.get("A2")).isNull();
+            assertThat(after.get("A3")).isEqualTo(getUnavailableValuePlaceholder(config));
+            assertThat(after.get("A4")).isEqualTo("cuTVQV0OpK");
+
+        }
+        finally {
+            TestHelper.dropTable(connection, "dbz5581");
+        }
+    }
+
+    @Test
+    @FixFor("DBZ-7006")
+    public void shouldStreamClobDataDataThatContainsSingleQuotesAtSpecificBoundaries() throws Exception {
+        TestHelper.dropTable(connection, "dbz7006");
+        try {
+            // Test data
+            final String insertData = replaceCharAt(createRandomStringWithAlphaNumeric(2000), 999, '\'');
+            final String updateData = replaceCharAt(createRandomStringWithAlphaNumeric(2000), 999, '\'');
+
+            connection.execute("CREATE TABLE dbz7006 (id numeric(9,0) primary key, data clob)");
+            TestHelper.streamTable(connection, "dbz7006");
+
+            final Clob snapshotClob = createClob(insertData);
+            connection.prepareQuery("INSERT INTO dbz7006 values (1,?)", ps -> ps.setClob(1, snapshotClob), null);
+            connection.commit();
+
+            Configuration config = TestHelper.defaultConfig()
+                    .with(OracleConnectorConfig.TABLE_INCLUDE_LIST, "DEBEZIUM\\.DBZ7006")
+                    .with(OracleConnectorConfig.LOB_ENABLED, "true")
+                    .build();
+
+            start(OracleConnector.class, config);
+            assertConnectorIsRunning();
+
+            waitForStreamingRunning(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+            // Insert - streaming
+            final Clob insertClob = createClob(insertData);
+            connection.prepareQuery("INSERT INTO dbz7006 values (2,?)", ps -> ps.setClob(1, insertClob), null);
+            connection.commit();
+
+            // Update - streaming
+            final Clob updateClob = createClob(updateData);
+            connection.prepareQuery("UPDATE dbz7006 set data = ? WHERE id = 2", ps -> ps.setClob(1, updateClob), null);
+            connection.commit();
+
+            final SourceRecords records = consumeRecordsByTopic(3);
+            final List<SourceRecord> tableRecords = records.recordsForTopic(topicName("DBZ7006"));
+
+            // Snapshot
+            SourceRecord snapshot = tableRecords.get(0);
+            VerifyRecord.isValidRead(snapshot, "ID", (byte) 1);
+            assertThat(getAfterField(snapshot, "DATA")).isEqualTo(insertData);
+
+            // Streaming
+            SourceRecord insert = tableRecords.get(1);
+            VerifyRecord.isValidInsert(insert, "ID", (byte) 2);
+            assertThat(getAfterField(insert, "DATA")).isEqualTo(insertData);
+
+            SourceRecord update = tableRecords.get(2);
+            VerifyRecord.isValidUpdate(update, "ID", (byte) 2);
+            assertThat(getAfterField(update, "DATA")).isEqualTo(updateData);
+
+            stopConnector();
+        }
+        finally {
+            TestHelper.dropTable(connection, "dbz7006");
+        }
+    }
+
+    @Test
+    @FixFor("DBZ-7790")
+    public void shouldNotMergeClobDataWhenNoPrimaryKey() throws Exception {
+        TestHelper.dropTable(connection, "DBZ7790");
+        try {
+            connection.execute("CREATE TABLE DBZ7790(id numeric(9,0), DATA CLOB)");
+            TestHelper.streamTable(connection, "DBZ7790");
+
+            connection.execute("INSERT INTO DBZ7790 (id,data) values (1,'aaa')");
+            connection.execute("INSERT INTO DBZ7790 (id,data) values (2,'bbb')");
+            connection.commit();
+
+            Configuration config = TestHelper.defaultConfig()
+                    .with(OracleConnectorConfig.TABLE_INCLUDE_LIST, "DEBEZIUM\\.DBZ7790")
+                    .with(OracleConnectorConfig.LOB_ENABLED, "true")
+                    .build();
+
+            start(OracleConnector.class, config);
+            assertConnectorIsRunning();
+            waitForStreamingRunning(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+            // Get snapshot records
+            SourceRecords sourceRecords = consumeRecordsByTopic(2);
+            List<SourceRecord> tableRecords = sourceRecords.recordsForTopic(topicName("DBZ7790"));
+            assertThat(tableRecords).hasSize(2);
+
+            SourceRecord insert1 = tableRecords.get(0);
+            Struct after = ((Struct) insert1.value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after.get("ID")).isEqualTo(1);
+            assertThat(after.get("DATA")).isEqualTo("aaa");
+
+            SourceRecord insert2 = tableRecords.get(1);
+            after = ((Struct) insert2.value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after.get("ID")).isEqualTo(2);
+            assertThat(after.get("DATA")).isEqualTo("bbb");
+
+            // Update - streaming
+            connection.execute("UPDATE DBZ7790 set data = 'ccc' WHERE id = 1");
+            connection.execute("UPDATE DBZ7790 set data = 'ddd' WHERE id = 2");
+            connection.commit();
+
+            sourceRecords = consumeRecordsByTopic(2);
+            tableRecords = sourceRecords.recordsForTopic(topicName("DBZ7790"));
+
+            // Get streaming records
+            assertThat(tableRecords).hasSize(2);
+
+            SourceRecord update1 = tableRecords.get(0);
+            assertThat(getAfterField(update1, "ID")).isEqualTo(1);
+            assertThat(getAfterField(update1, "DATA")).isEqualTo("ccc");
+
+            SourceRecord update2 = tableRecords.get(1);
+            assertThat(getAfterField(update2, "ID")).isEqualTo(2);
+            assertThat(getAfterField(update2, "DATA")).isEqualTo("ddd");
+            stopConnector();
+        }
+        finally {
+            TestHelper.dropTable(connection, "DBZ7790");
+        }
+    }
+
+    @Test
+    @FixFor("DBZ-7790")
+    public void shouldNotMergeLargeClobDataWhenNoPrimaryKey() throws Exception {
+        TestHelper.dropTable(connection, "DBZ7790");
+        try {
+            connection.execute("CREATE TABLE DBZ7790(id numeric(9,0), DATA CLOB)");
+            TestHelper.streamTable(connection, "DBZ7790");
+
+            connection.execute("INSERT INTO DBZ7790 (id,data) values (1,'aaa')");
+            connection.execute("INSERT INTO DBZ7790 (id,data) values (2,'bbb')");
+            connection.commit();
+
+            Configuration config = TestHelper.defaultConfig()
+                    .with(OracleConnectorConfig.TABLE_INCLUDE_LIST, "DEBEZIUM\\.DBZ7790")
+                    .with(OracleConnectorConfig.LOB_ENABLED, "true")
+                    .build();
+
+            start(OracleConnector.class, config);
+            assertConnectorIsRunning();
+            waitForStreamingRunning(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+            // Get snapshot records
+            SourceRecords sourceRecords = consumeRecordsByTopic(2);
+            List<SourceRecord> tableRecords = sourceRecords.recordsForTopic(topicName("DBZ7790"));
+            assertThat(tableRecords).hasSize(2);
+
+            SourceRecord insert1 = tableRecords.get(0);
+            Struct after = ((Struct) insert1.value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after.get("ID")).isEqualTo(1);
+            assertThat(after.get("DATA")).isEqualTo("aaa");
+
+            SourceRecord insert2 = tableRecords.get(1);
+            after = ((Struct) insert2.value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after.get("ID")).isEqualTo(2);
+            assertThat(after.get("DATA")).isEqualTo("bbb");
+
+            // Update - streaming
+            final String clobData1 = createRandomStringWithAlphaNumeric(5000);
+            final Clob c1 = connection.connection().createClob();
+            c1.setString(1, clobData1);
+            connection.prepareQuery("UPDATE DBZ7790 SET data = ? WHERE id = 1", ps -> ps.setClob(1, c1), null);
+
+            final String clobData2 = createRandomStringWithAlphaNumeric(5000);
+            final Clob c2 = connection.connection().createClob();
+            c2.setString(1, clobData2);
+            connection.prepareQuery("UPDATE DBZ7790 SET data = ? WHERE id = 2", ps -> ps.setClob(1, c2), null);
+            connection.commit();
+            sourceRecords = consumeRecordsByTopic(2);
+            tableRecords = sourceRecords.recordsForTopic(topicName("DBZ7790"));
+
+            // Get streaming records
+            assertThat(tableRecords).hasSize(2);
+
+            SourceRecord update1 = tableRecords.get(0);
+            assertThat(getAfterField(update1, "ID")).isEqualTo(1);
+            assertThat(getAfterField(update1, "DATA")).isEqualTo(clobData1);
+
+            SourceRecord update2 = tableRecords.get(1);
+            assertThat(getAfterField(update2, "ID")).isEqualTo(2);
+            assertThat(getAfterField(update2, "DATA")).isEqualTo(clobData2);
+            stopConnector();
+        }
+        finally {
+            TestHelper.dropTable(connection, "DBZ7790");
+        }
+    }
+
+    private String createRandomStringWithAlphaNumeric(int length) {
+        return RandomStringUtils.randomAlphabetic(length);
+    }
+
+    private String replaceCharAt(String data, int index, char ch) {
+        StringBuilder sb = new StringBuilder(data);
+        sb.setCharAt(index, ch);
+        return sb.toString();
     }
 
     private Clob createClob(String data) throws SQLException {

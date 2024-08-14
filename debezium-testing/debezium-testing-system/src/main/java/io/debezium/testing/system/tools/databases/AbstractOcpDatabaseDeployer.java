@@ -17,6 +17,7 @@ import org.slf4j.LoggerFactory;
 import io.debezium.testing.system.tools.Deployer;
 import io.debezium.testing.system.tools.OpenShiftUtils;
 import io.debezium.testing.system.tools.YAML;
+import io.fabric8.kubernetes.api.model.PersistentVolumeClaim;
 import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.api.model.apps.Deployment;
@@ -28,12 +29,12 @@ import io.fabric8.openshift.client.OpenShiftClient;
 public abstract class AbstractOcpDatabaseDeployer<T> implements Deployer<T> {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(AbstractOcpDatabaseDeployer.class);
-    private final OpenShiftClient ocp;
-    private final OpenShiftUtils ocpUtils;
-    private final String project;
-    private final Secret pullSecret;
-    private Deployment deployment;
-    private List<Service> services;
+    protected final OpenShiftClient ocp;
+    protected final OpenShiftUtils ocpUtils;
+    protected final String project;
+    protected final Secret pullSecret;
+    protected Deployment deployment;
+    protected List<Service> services;
 
     public AbstractOcpDatabaseDeployer(
                                        String project,
@@ -59,9 +60,8 @@ public abstract class AbstractOcpDatabaseDeployer<T> implements Deployer<T> {
 
     @Override
     public T deploy() {
-        LOGGER.info("Deploying pull secrets");
-
         if (pullSecret != null) {
+            LOGGER.info("Deploying pull secrets");
             ocp.secrets().inNamespace(project).createOrReplace(pullSecret);
             ocpUtils.linkPullSecret(project, "default", pullSecret);
         }
@@ -88,6 +88,7 @@ public abstract class AbstractOcpDatabaseDeployer<T> implements Deployer<T> {
 
         protected String project;
         protected Deployment deployment;
+        protected PersistentVolumeClaim pvc;
         protected List<Service> services;
         protected OpenShiftClient ocpClient;
         protected Secret pullSecret;

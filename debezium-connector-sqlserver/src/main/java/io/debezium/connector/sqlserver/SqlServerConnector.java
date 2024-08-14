@@ -6,7 +6,6 @@
 package io.debezium.connector.sqlserver;
 
 import static io.debezium.config.CommonConnectorConfig.TASK_ID;
-import static io.debezium.connector.sqlserver.SqlServerConnectorConfig.DATABASE_NAME;
 import static io.debezium.connector.sqlserver.SqlServerConnectorConfig.DATABASE_NAMES;
 
 import java.sql.SQLException;
@@ -15,6 +14,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigValue;
@@ -22,9 +22,11 @@ import org.apache.kafka.connect.connector.Task;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.debezium.DebeziumException;
 import io.debezium.config.Configuration;
 import io.debezium.connector.common.RelationalBaseSourceConnector;
 import io.debezium.relational.RelationalDatabaseConnectorConfig;
+import io.debezium.relational.TableId;
 
 /**
  * The main connector class used to instantiate configuration and execution classes
@@ -71,34 +73,29 @@ public class SqlServerConnector extends RelationalBaseSourceConnector {
 
     private List<Map<String, String>> buildTaskConfigs(SqlServerConnection connection, SqlServerConnectorConfig config,
                                                        int maxTasks) {
-        final boolean multiPartitionMode = config.isMultiPartitionModeEnabled();
         List<String> databaseNames = config.getDatabaseNames();
 
         // Initialize the database list for each task
         List<List<String>> databasesByTask = new ArrayList<>();
-        for (int i = 0; i < maxTasks; i++) {
+        final int numTasks = Math.min(maxTasks, config.getDatabaseNames().size());
+        for (int i = 0; i < numTasks; i++) {
             databasesByTask.add(new ArrayList<>());
         }
 
         // Add each database to a task list via round-robin.
         for (int databaseNameIndex = 0; databaseNameIndex < databaseNames.size(); databaseNameIndex++) {
-            int taskIndex = databaseNameIndex % maxTasks;
+            int taskIndex = databaseNameIndex % numTasks;
             String realDatabaseName = connection.retrieveRealDatabaseName(databaseNames.get(databaseNameIndex));
             databasesByTask.get(taskIndex).add(realDatabaseName);
         }
 
         // Create a task config for each task, assigning each a list of database names.
         List<Map<String, String>> taskConfigs = new ArrayList<>();
-        for (int taskIndex = 0; taskIndex < maxTasks; taskIndex++) {
+        for (int taskIndex = 0; taskIndex < numTasks; taskIndex++) {
             String taskDatabases = String.join(",", databasesByTask.get(taskIndex));
             Map<String, String> taskProperties = new HashMap<>(properties);
-            if (multiPartitionMode) {
-                taskProperties.put(SqlServerConnectorConfig.DATABASE_NAMES.name(), taskDatabases);
-                taskProperties.put(TASK_ID, String.valueOf(taskIndex));
-            }
-            else {
-                taskProperties.put(SqlServerConnectorConfig.DATABASE_NAME.name(), taskDatabases);
-            }
+            taskProperties.put(SqlServerConnectorConfig.DATABASE_NAMES.name(), taskDatabases);
+            taskProperties.put(TASK_ID, String.valueOf(taskIndex));
             taskConfigs.add(Collections.unmodifiableMap(taskProperties));
         }
 
@@ -116,8 +113,7 @@ public class SqlServerConnector extends RelationalBaseSourceConnector {
 
     @Override
     protected void validateConnection(Map<String, ConfigValue> configValues, Configuration config) {
-        if (!configValues.get(DATABASE_NAME.name()).errorMessages().isEmpty()
-                || !configValues.get(DATABASE_NAMES.name()).errorMessages().isEmpty()) {
+        if (!configValues.get(DATABASE_NAMES.name()).errorMessages().isEmpty()) {
             return;
         }
 
@@ -130,12 +126,20 @@ public class SqlServerConnector extends RelationalBaseSourceConnector {
             LOGGER.debug("Successfully tested connection for {} with user '{}'", connection.connectionString(),
                     connection.username());
             LOGGER.info("Checking if user has access to CDC table");
-            boolean userHasAccessToCDCTable = connection.checkIfConnectedUserHasAccessToCDCTable();
-            if (!userHasAccessToCDCTable
-                    && sqlServerConfig.getSnapshotMode() != SqlServerConnectorConfig.SnapshotMode.INITIAL_ONLY) {
-                String errorMessage = "User " + userValue.value() + " does not have access to CDC table and can only be used in initial_only snapshot mode";
-                LOGGER.error(errorMessage);
-                userValue.addErrorMessage(errorMessage);
+            if (sqlServerConfig.getSnapshotMode() != SqlServerConnectorConfig.SnapshotMode.INITIAL_ONLY) {
+                final List<String> noAccessDatabaseNames = new ArrayList<>();
+                for (String databaseName : sqlServerConfig.getDatabaseNames()) {
+                    if (!connection.checkIfConnectedUserHasAccessToCDCTable(databaseName)) {
+                        noAccessDatabaseNames.add(databaseName);
+                    }
+                }
+                if (!noAccessDatabaseNames.isEmpty()) {
+                    String errorMessage = String.format(
+                            "User %s does not have access to CDC schema in the following databases: %s. This user can only be used in initial_only snapshot mode",
+                            config.getString(RelationalDatabaseConnectorConfig.USER), String.join(", ", noAccessDatabaseNames));
+                    LOGGER.error(errorMessage);
+                    userValue.addErrorMessage(errorMessage);
+                }
             }
         }
         catch (Exception e) {
@@ -152,10 +156,34 @@ public class SqlServerConnector extends RelationalBaseSourceConnector {
     }
 
     private SqlServerConnection connect(SqlServerConnectorConfig sqlServerConfig) {
-        return new SqlServerConnection(sqlServerConfig.getJdbcConfig(),
-                sqlServerConfig.getSourceTimestampMode(), null,
-                () -> getClass().getClassLoader(),
-                Collections.emptySet(),
-                sqlServerConfig.isMultiPartitionModeEnabled());
+        return new SqlServerConnection(sqlServerConfig, null, Collections.emptySet(),
+                sqlServerConfig.useSingleDatabase());
+    }
+
+    @SuppressWarnings("unchecked")
+    @Override
+    public List<TableId> getMatchingCollections(Configuration config) {
+        final SqlServerConnectorConfig connectorConfig = new SqlServerConnectorConfig(config);
+        final List<String> databaseNames = connectorConfig.getDatabaseNames();
+
+        try (SqlServerConnection connection = connect(connectorConfig)) {
+            List<TableId> tables = new ArrayList<>();
+            databaseNames.forEach(databaseName -> {
+                try {
+                    tables.addAll(
+                            connection.readTableNames(databaseName, null, null, new String[]{ "TABLE" }).stream()
+                                    .filter(tableId -> connectorConfig.getTableFilters().dataCollectionFilter().isIncluded(tableId))
+                                    .collect(Collectors.toList()));
+                }
+                catch (SQLException e) {
+                    throw new DebeziumException(e);
+                }
+            });
+
+            return tables;
+        }
+        catch (SQLException e) {
+            throw new RuntimeException("Could not retrieve real database name", e);
+        }
     }
 }

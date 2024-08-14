@@ -23,7 +23,7 @@ public interface StreamingChangeEventSource<P extends Partition, O extends Offse
      *
      * @throws InterruptedException
      */
-    default void init() throws InterruptedException {
+    default void init(O offsetContext) throws InterruptedException {
     }
 
     /**
@@ -67,6 +67,10 @@ public interface StreamingChangeEventSource<P extends Partition, O extends Offse
      * like Postgres and Oracle to indicate how far the source TX log can be
      * discarded.
      */
-    default void commitOffset(Map<String, ?> offset) {
+    default void commitOffset(Map<String, ?> partition, Map<String, ?> offset) {
+    }
+
+    default O getOffsetContext() {
+        return null;
     }
 }

@@ -5,11 +5,6 @@
  */
 package io.debezium.testing.system.tools.databases;
 
-import static io.debezium.testing.system.tools.WaitConditions.scaled;
-import static java.util.concurrent.TimeUnit.MINUTES;
-import static java.util.concurrent.TimeUnit.SECONDS;
-import static org.awaitility.Awaitility.await;
-
 import java.util.List;
 
 import org.slf4j.Logger;
@@ -45,14 +40,6 @@ public abstract class AbstractOcpDatabaseController<C extends DatabaseClient<?, 
         this.ocpUtils = new OpenShiftUtils(ocp);
     }
 
-    private Service getLoadBalancedService() {
-        return ocp
-                .services()
-                .inNamespace(project)
-                .withName(deployment.getMetadata().getName() + "-lb")
-                .get();
-    }
-
     private Service getService() {
         return ocp
                 .services()
@@ -61,23 +48,10 @@ public abstract class AbstractOcpDatabaseController<C extends DatabaseClient<?, 
                 .get();
     }
 
-    private void awaitIngress() {
-        LOGGER.info("Waiting for LoadBalancerIngress to be available");
-        await()
-                .atMost(scaled(2), MINUTES)
-                .pollInterval(3, SECONDS)
-                .until(() -> getLoadBalancedService().getStatus().getLoadBalancer().getIngress().size() > 0);
-    }
-
     @Override
     public void reload() throws InterruptedException {
         LOGGER.info("Removing all pods of '" + name + "' deployment in namespace '" + project + "'");
-        ocp.apps().deployments().inNamespace(project).withName(name).scale(0);
-        await()
-                .atMost(scaled(30), SECONDS)
-                .pollDelay(5, SECONDS)
-                .pollInterval(3, SECONDS)
-                .until(() -> ocp.pods().inNamespace(project).list().getItems().isEmpty());
+        ocpUtils.scaleDeploymentToZero(deployment);
         LOGGER.info("Restoring all pods of '" + name + "' deployment in namespace '" + project + "'");
         ocp.apps().deployments().inNamespace(project).withName(name).scale(1);
     }
@@ -89,23 +63,21 @@ public abstract class AbstractOcpDatabaseController<C extends DatabaseClient<?, 
 
     @Override
     public int getDatabasePort() {
-        return getService().getSpec().getPorts().stream()
-                .filter(p -> p.getName().equals("db"))
-                .findAny()
-                .get().getPort();
+        return getOriginalDatabasePort();
     }
 
     @Override
     public String getPublicDatabaseHostname() {
-        awaitIngress();
-        return getLoadBalancedService().getStatus().getLoadBalancer()
-                .getIngress().get(0).getHostname();
+        return getDatabaseHostname();
     }
 
     @Override
     public int getPublicDatabasePort() {
-        awaitIngress();
-        return getLoadBalancedService().getSpec().getPorts().stream()
+        return getDatabasePort();
+    }
+
+    private int getOriginalDatabasePort() {
+        return getService().getSpec().getPorts().stream()
                 .filter(p -> p.getName().equals("db"))
                 .findAny()
                 .get().getPort();

@@ -21,30 +21,37 @@ public class SqlServerSchemaChangeEventEmitter implements SchemaChangeEventEmitt
     private final SqlServerOffsetContext offsetContext;
     private final SqlServerChangeTable changeTable;
     private final Table tableSchema;
+    private final SqlServerDatabaseSchema schema;
     private final SchemaChangeEventType eventType;
 
-    public SqlServerSchemaChangeEventEmitter(SqlServerPartition partition, SqlServerOffsetContext offsetContext, SqlServerChangeTable changeTable, Table tableSchema,
+    public SqlServerSchemaChangeEventEmitter(SqlServerPartition partition,
+                                             SqlServerOffsetContext offsetContext,
+                                             SqlServerChangeTable changeTable,
+                                             Table tableSchema,
+                                             SqlServerDatabaseSchema schema,
                                              SchemaChangeEventType eventType) {
         this.partition = partition;
         this.offsetContext = offsetContext;
         this.changeTable = changeTable;
         this.tableSchema = tableSchema;
+        this.schema = schema;
         this.eventType = eventType;
     }
 
     @Override
     public void emitSchemaChangeEvent(Receiver receiver) throws InterruptedException {
-        final SchemaChangeEvent event = new SchemaChangeEvent(
-                partition.getSourcePartition(),
-                offsetContext.getOffset(),
-                offsetContext.getSourceInfo(),
+        final SchemaChangeEvent event = SchemaChangeEvent.of(
+                eventType,
+                partition,
+                offsetContext,
                 changeTable.getSourceTableId().catalog(),
                 changeTable.getSourceTableId().schema(),
                 "N/A",
                 tableSchema,
-                eventType,
                 false);
 
-        receiver.schemaChangeEvent(event);
+        if (!schema.skipSchemaChangeEvent(event)) {
+            receiver.schemaChangeEvent(event);
+        }
     }
 }

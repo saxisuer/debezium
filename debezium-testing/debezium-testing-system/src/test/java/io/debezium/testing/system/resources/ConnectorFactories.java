@@ -5,6 +5,8 @@
  */
 package io.debezium.testing.system.resources;
 
+import java.util.Random;
+
 import io.debezium.testing.system.tools.ConfigProperties;
 import io.debezium.testing.system.tools.databases.SqlDatabaseController;
 import io.debezium.testing.system.tools.databases.mongodb.MongoDatabaseController;
@@ -26,18 +28,22 @@ public class ConnectorFactories {
     public ConnectorConfigBuilder mysql(SqlDatabaseController controller, String connectorName) {
         ConnectorConfigBuilder cb = new ConnectorConfigBuilder(connectorName);
         String dbHost = controller.getDatabaseHostname();
+        Random random = new Random();
         int dbPort = controller.getDatabasePort();
 
         return cb
-                .put("database.server.name", cb.getDbServerName())
+                .put("topic.prefix", cb.getDbServerName())
+                .put("database.server.id", 5400 + random.nextInt(1000))
                 .put("connector.class", "io.debezium.connector.mysql.MySqlConnector")
                 .put("task.max", 1)
                 .put("database.hostname", dbHost)
                 .put("database.port", dbPort)
                 .put("database.user", ConfigProperties.DATABASE_MYSQL_DBZ_USERNAME)
                 .put("database.password", ConfigProperties.DATABASE_MYSQL_DBZ_PASSWORD)
-                .put("database.history.kafka.bootstrap.servers", kafka.getBootstrapAddress())
-                .put("database.history.kafka.topic", "schema-changes.inventory");
+                .put("schema.history.internal.kafka.bootstrap.servers", kafka.getBootstrapAddress())
+                .put("schema.history.internal.kafka.topic", "schema-changes.inventory")
+                .addOperationRouterForTable("u", "customers");
+
     }
 
     public ConnectorConfigBuilder postgresql(SqlDatabaseController controller, String connectorName) {
@@ -46,7 +52,7 @@ public class ConnectorFactories {
         int dbPort = controller.getDatabasePort();
 
         return cb
-                .put("database.server.name", cb.getDbServerName())
+                .put("topic.prefix", cb.getDbServerName())
                 .put("connector.class", "io.debezium.connector.postgresql.PostgresConnector")
                 .put("task.max", 1)
                 .put("database.hostname", dbHost)
@@ -54,9 +60,9 @@ public class ConnectorFactories {
                 .put("database.user", ConfigProperties.DATABASE_POSTGRESQL_DBZ_USERNAME)
                 .put("database.password", ConfigProperties.DATABASE_POSTGRESQL_DBZ_PASSWORD)
                 .put("database.dbname", ConfigProperties.DATABASE_POSTGRESQL_DBZ_DBNAME)
-                .put("database.dbname", ConfigProperties.DATABASE_POSTGRESQL_DBZ_DBNAME)
                 .put("slot.name", "debezium")
-                .put("plugin.name", "pgoutput");
+                .put("plugin.name", "pgoutput")
+                .addOperationRouterForTable("u", "customers");
     }
 
     public ConnectorConfigBuilder sqlserver(SqlDatabaseController controller, String connectorName) {
@@ -65,30 +71,59 @@ public class ConnectorFactories {
         int dbPort = controller.getDatabasePort();
 
         return cb
-                .put("database.server.name", cb.getDbServerName())
+                .put("topic.prefix", cb.getDbServerName())
                 .put("connector.class", "io.debezium.connector.sqlserver.SqlServerConnector")
                 .put("task.max", 1)
                 .put("database.hostname", dbHost)
                 .put("database.port", dbPort)
                 .put("database.user", ConfigProperties.DATABASE_SQLSERVER_DBZ_USERNAME)
                 .put("database.password", ConfigProperties.DATABASE_SQLSERVER_DBZ_PASSWORD)
-                .put("database.dbname", ConfigProperties.DATABASE_SQLSERVER_DBZ_DBNAME)
-                .put("database.history.kafka.bootstrap.servers", kafka.getBootstrapAddress())
-                .put("database.history.kafka.topic", "schema-changes.inventory");
+                .put("database.names", ConfigProperties.DATABASE_SQLSERVER_DBZ_DBNAMES)
+                .put("database.encrypt", false)
+                .put("schema.history.internal.kafka.bootstrap.servers", kafka.getBootstrapAddress())
+                .put("schema.history.internal.kafka.topic", "schema-changes.inventory")
+                .addOperationRouterForTable("u", "customers");
     }
 
     public ConnectorConfigBuilder mongo(MongoDatabaseController controller, String connectorName) {
         ConnectorConfigBuilder cb = new ConnectorConfigBuilder(connectorName);
-        String dbHost = controller.getDatabaseHostname();
-        int dbPort = controller.getDatabasePort();
-
-        return cb
-                .put("mongodb.name", cb.getDbServerName())
+        cb
+                .put("topic.prefix", cb.getDbServerName())
                 .put("connector.class", "io.debezium.connector.mongodb.MongoDbConnector")
                 .put("task.max", 1)
-                .put("mongodb.hosts", "rs0/" + dbHost + ":" + dbPort)
                 .put("mongodb.user", ConfigProperties.DATABASE_MONGO_DBZ_USERNAME)
-                .put("mongodb.password", ConfigProperties.DATABASE_MONGO_DBZ_PASSWORD);
+                .put("mongodb.password", ConfigProperties.DATABASE_MONGO_DBZ_PASSWORD)
+                .addOperationRouterForTable("u", "customers")
+                .put("mongodb.connection.string", controller.getPublicDatabaseUrl());
+        return cb;
+    }
+
+    public ConnectorConfigBuilder shardedMongo(MongoDatabaseController controller, String connectorName) {
+        ConnectorConfigBuilder cb = new ConnectorConfigBuilder(connectorName);
+        cb
+                .put("topic.prefix", connectorName)
+                .put("connector.class", "io.debezium.connector.mongodb.MongoDbConnector")
+                .put("task.max", 1)
+                .put("mongodb.connection.string", controller.getPublicDatabaseUrl())
+                .put("mongodb.connection.mode", "sharded")
+                .addMongoDbzUser()
+                .addOperationRouterForTable("u", "customers");
+        return cb;
+    }
+
+    public ConnectorConfigBuilder shardedReplicaMongo(MongoDatabaseController controller, String connectorName) {
+
+        // String connectionUrl =;
+        ConnectorConfigBuilder cb = new ConnectorConfigBuilder(connectorName);
+        cb
+                .put("topic.prefix", connectorName)
+                .put("connector.class", "io.debezium.connector.mongodb.MongoDbConnector")
+                .put("task.max", 4)
+                .put("mongodb.connection.string", controller.getPublicDatabaseUrl())
+                .put("mongodb.connection.mode", "replica_set")
+                .addMongoDbzUser()
+                .addOperationRouterForTable("u", "customers");
+        return cb;
     }
 
     public ConnectorConfigBuilder db2(SqlDatabaseController controller, String connectorName) {
@@ -97,7 +132,7 @@ public class ConnectorFactories {
         int dbPort = controller.getDatabasePort();
 
         return cb
-                .put("database.server.name", cb.getDbServerName())
+                .put("topic.prefix", cb.getDbServerName())
                 .put("connector.class", "io.debezium.connector.db2.Db2Connector")
                 .put("task.max", 1)
                 .put("database.hostname", dbHost)
@@ -106,8 +141,9 @@ public class ConnectorFactories {
                 .put("database.password", ConfigProperties.DATABASE_DB2_DBZ_PASSWORD)
                 .put("database.dbname", ConfigProperties.DATABASE_DB2_DBZ_DBNAME)
                 .put("database.cdcschema", ConfigProperties.DATABASE_DB2_CDC_SCHEMA)
-                .put("database.history.kafka.bootstrap.servers", kafka.getBootstrapAddress())
-                .put("database.history.kafka.topic", "schema-changes.inventory");
+                .put("schema.history.internal.kafka.bootstrap.servers", kafka.getBootstrapAddress())
+                .put("schema.history.internal.kafka.topic", "schema-changes.inventory")
+                .addOperationRouterForTable("u", "CUSTOMERS");
     }
 
     public ConnectorConfigBuilder oracle(SqlDatabaseController controller, String connectorName) {
@@ -116,7 +152,7 @@ public class ConnectorFactories {
         int dbPort = controller.getDatabasePort();
 
         return cb
-                .put("database.server.name", cb.getDbServerName())
+                .put("topic.prefix", cb.getDbServerName())
                 .put("connector.class", "io.debezium.connector.oracle.OracleConnector")
                 .put("task.max", 1)
                 .put("database.hostname", dbHost)
@@ -128,8 +164,27 @@ public class ConnectorFactories {
                 .put("schema.include.list", "DEBEZIUM")
                 .put("table.include.list", "DEBEZIUM.CUSTOMERS")
                 .put("database.pdb.name", ConfigProperties.DATABASE_ORACLE_PDBNAME)
-                .put("database.history.kafka.bootstrap.servers", kafka.getBootstrapAddress())
-                .put("database.history.kafka.topic", "schema-changes.oracle")
-                .put("log.mining.strategy", "online_catalog");
+                .put("schema.history.internal.kafka.bootstrap.servers", kafka.getBootstrapAddress())
+                .put("schema.history.internal.kafka.topic", "schema-changes.oracle")
+                .put("log.mining.strategy", "online_catalog")
+                .addOperationRouterForTable("u", "CUSTOMERS");
+    }
+
+    public ConnectorConfigBuilder jdbcSink(SqlDatabaseController controller, String connectorName) {
+        ConnectorConfigBuilder cb = new ConnectorConfigBuilder(connectorName);
+        String dbHost = controller.getDatabaseHostname();
+        int dbPort = controller.getDatabasePort();
+        String connectionUrl = String.format("jdbc:mysql://%s:%s/inventory", dbHost, dbPort);
+        return cb
+                .put("connector.class", "io.debezium.connector.jdbc.JdbcSinkConnector")
+                .put("task.max", 1)
+                .put("connection.url", connectionUrl)
+                .put("connection.username", ConfigProperties.DATABASE_MYSQL_DBZ_USERNAME)
+                .put("connection.password", ConfigProperties.DATABASE_MYSQL_DBZ_PASSWORD)
+                .put("insert.mode", "upsert")
+                .put("primary.key.mode", "kafka")
+                .put("schema.evolution", "basic")
+                .put("database.time_zone", "UTC")
+                .put("topics", "jdbc_sink_test");
     }
 }

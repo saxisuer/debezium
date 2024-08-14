@@ -10,6 +10,10 @@ GET DIAGNOSTICS CONDITION @cno @errno = MYSQL_ERRNO;
 GET CURRENT DIAGNOSTICS CONDITION 1 errno = MYSQL_ERRNO, msg = MESSAGE_TEXT;
 GET STACKED DIAGNOSTICS CONDITION 1 errno = MYSQL_ERRNO, msg = MESSAGE_TEXT;
 GET CURRENT DIAGNOSTICS errcount = NUMBER;
+-- Create User
+CREATE USER 'test_crm_debezium'@'%' IDENTIFIED WITH 'mysql_native_password' AS '*6BB4837EB74329105EE4568DDA7DC67ED2CA2AD9' PASSWORD EXPIRE NEVER COMMENT '-';
+CREATE USER 'jim'@'localhost' ATTRIBUTE '{"fname": "James", "lname": "Scott", "phone": "123-456-7890"}';
+CREATE USER 'jim' @'localhost' ATTRIBUTE '{"fname": "James", "lname": "Scott", "phone": "123-456-7890"}';
 -- Create Table
 create table new_t  (like t1);
 create table log_table(row varchar(512));
@@ -28,6 +32,7 @@ create table table_with_character_set_eq (id int, data varchar(50)) character se
 create table table_with_character_set (id int, data varchar(50)) character set default;
 create table table_with_visible_index (id int, data varchar(50), UNIQUE INDEX `data_UNIQUE` (`data` ASC) VISIBLE);
 create table table_with_index (id int, data varchar(50), UNIQUE INDEX `data_UNIQUE` (`data` ASC));
+create table table_with_keyword_as_column_name (geometry int, national int);
 create table transactional_table(name varchar(255), class_id int, id int) transactional=1;
 create table transactional(name varchar(255), class_id int, id int);
 create table add_test(col1 varchar(255), col2 int, col3 int);
@@ -42,6 +47,8 @@ create table rack_shelf_bin ( id int unsigned not null auto_increment unique pri
 CREATE TABLE `tblSRCHjob_desc` (`description_id` bigint(20) unsigned NOT NULL AUTO_INCREMENT, `description` mediumtext NOT NULL, PRIMARY KEY (`description_id`)) ENGINE=TokuDB AUTO_INCREMENT=4095997820 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=TOKUDB_QUICKLZ;
 create table invisible_column_test(id int, col1 int INVISIBLE);
 create table visible_column_test(id int, col1 int VISIBLE);
+create table table_with_buckets(id int(11) auto_increment NOT NULL COMMENT 'ID', buckets int(11) NOT NULL COMMENT '分桶数');
+create table statement(id int);
 
 CREATE TABLE table_items (id INT, purchased DATE)
     PARTITION BY RANGE( YEAR(purchased) )
@@ -68,6 +75,14 @@ CREATE TABLE table_items_with_subpartitions (id INT, purchased DATE)
             SUBPARTITION s5
         )
     );
+
+CREATE TABLE `TABLE1` (
+`COL1` INT(10) UNSIGNED NOT NULL,
+`COL2` VARCHAR(32) NOT NULL,
+`COL3` ENUM (`VAR1`,`VAR2`, `VAR3`) NOT NULL,
+PRIMARY KEY (`COL1`, `COL2`, `COL3`),
+CLUSTERING KEY `CLKEY1` (`COL3`, `COL2`))
+ENGINE=TOKUDB DEFAULT CHARSET=CP1251;
 
 CREATE TABLE positions_rollover (
     id bigint(20) NOT NULL AUTO_INCREMENT,
@@ -104,6 +119,10 @@ CREATE TABLE CustomerTable (
     Phone varchar(24)
  ) ENGINE = CONNECT TABLE_TYPE = ODBC;
 
+CREATE TABLE CustomerTable (
+    table_type varchar(5)
+);
+
 CREATE TABLE `daily_intelligences`(
 `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '',
 `partner_code` varchar(32) DEFAULT NULL COMMENT '',
@@ -125,6 +144,79 @@ CREATE TABLE `t_test_curdate` (
 `c1` datetime NOT NULL DEFAULT CURDATE() COMMENT 'error test',
 PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE OR REPLACE TABLE `t_table` (
+`info_no` int(11) unsigned NOT NULL AUTO_INCREMENT,
+`product_no` int(11) unsigned NOT NULL,
+`member_id` varchar(30) COLLATE utf8mb4_unicode_ci NOT NULL,
+`app_url` varchar(500) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+`redirect_url` varchar(200) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+`scope` varchar(200) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+PRIMARY KEY (`info_no`),
+UNIQUE KEY `UN_member_id` (`member_id`) USING BTREE,
+UNIQUE KEY `UN_product_no` (`product_no`) USING BTREE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci ROW_FORMAT=DYNAMIC;
+
+CREATE TABLE `table_default_fn`(`quote_id` varchar(32) NOT NULL,`created_at` bigint(20) NOT NULL DEFAULT unix_timestamp());
+
+CREATE TABLE IF NOT EXISTS `contract_center`.`ent_folder_letter_relationship` (
+`id` BIGINT(19) UNSIGNED NOT NULL COMMENT '唯一标识',
+`layer` TINYINT(4) UNSIGNED DEFAULT _UTF8MB4'0' COMMENT '文档所属层级，0-主关联文档， 1-次关联文档',
+`deleted` TINYINT(1) NOT NULL DEFAULT _UTF8MB4'0' COMMENT '0-有效记录, 1-删除',
+`data_create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP() COMMENT '创建时间',
+`data_update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP() ON UPDATE CURRENT_TIMESTAMP() COMMENT '更新时间',
+PRIMARY KEY(`id`)) ENGINE = InnoDB DEFAULT CHARACTER SET = UTF8MB4;
+
+CREATE TABLE `auth_realm_clients` (
+`pk_realm` int unsigned NOT NULL DEFAULT '0',
+`fk_realm` int unsigned DEFAULT NULL,
+`client_id` varchar(150) NOT NULL,
+`client_secret` blob NOT NULL,
+PRIMARY KEY (`pk_realm`),
+KEY `auth_realms_auth_realm_clients` (`fk_realm`)
+) START TRANSACTION ENGINE=InnoDB DEFAULT CHARSET=latin1;
+
+create table `site_checker_b_sonet_group_favorites` (
+USER_ID int(11) not null,
+GROUP_ID int(11) not null,
+DATE_ADD datetime DEFAULT NULL,
+primary key (USER_ID, GROUP_ID)
+);
+
+CREATE TABLE `EmailTemplates` (
+  `EmailID` INT(11) UNSIGNED NOT NULL AUTO_INCREMENT,
+  `AccountID` BIGINT(12) unsigned NOT NULL DEFAULT 0,
+  `WebsiteTemplateTitle` VARCHAR(100) NOT NULL,
+  `Subject` VARCHAR(128) NOT NULL,
+  `MailBody` TEXT NOT NULL,
+  `MailHtmlBody` TEXT DEFAULT NULL,
+  PRIMARY KEY (`EmailID`),
+  KEY `ixAccount` (`AccountID`) USING BTREE
+) ENGINE=INNODB AUTO_INCREMENT=5396 DEFAULT CHARSET=LATIN1 ROW_FORMAT=DYNAMIC WITH SYSTEM VERSIONING;
+
+CREATE TABLE T1 (
+ID INT NOT NULL,
+NAME VARCHAR(255),
+UNIQUE KEY(ID)
+) PARTITION BY KEY() PARTITIONS 2;
+CREATE TABLE T1 (C NATIONAL CHAR);
+CREATE TABLE T1 (C GEOMETRY SRID 0);
+CREATE TABLE T1 (C POINT SRID 0);
+CREATE TABLE T1 (C LINESTRING SRID 0);
+CREATE TABLE T1 (C POLYGON SRID 0);
+CREATE TABLE T1 (C MULTIPOINT SRID 0);
+CREATE TABLE T1 (C MULTILINESTRING SRID 0);
+CREATE TABLE T1 (C MULTIPOLYGON SRID 0);
+CREATE TABLE T1 (C GEOMETRYCOLLECTION SRID 0);
+CREATE TABLE T1 (ID BIGINT, S VARCHAR(100), I INT, CONSTRAINT ABC CHECK (ID < 5) ENFORCED);
+CREATE TABLE T1 (ID BIGINT REFERENCES TT (TT_ID) ON DELETE SET DEFAULT);
+CREATE TABLE T1 (ID BIGINT REFERENCES TT (TT_ID) ON UPDATE SET DEFAULT);
+
+CREATE TABLE `AAA` ( `UID` UUID NOT NULL)
+ENGINE=InnoDB DEFAULT CHARSET=UTF8MB4 COLLATE=UTF8MB4_GENERAL_CI;
+CREATE TABLE `test_table\\`(id INT(11) NOT NULL, PRIMARY KEY (`id`)) ENGINE = INNODB;
+CREATE TABLE `\\test_table`(id INT(11) NOT NULL, PRIMARY KEY (`id`)) ENGINE = INNODB;
+CREATE TABLE `\\test\\_table\\`(id INT(11) NOT NULL, PRIMARY KEY (`id`)) ENGINE = INNODB;
 #end
 #begin
 -- Rename table
@@ -132,6 +224,7 @@ PRIMARY KEY (`id`)
 RENAME TABLE old_table TO tmp_table, new_table TO old_table, tmp_table TO new_table;
 RENAME TABLE table_b TO table_a;
 RENAME TABLE current_db.tbl_name TO other_db.tbl_name;
+rename table debezium_all_types_old to debezium_all_types, test_json_object_old wait 10 to test_json_object;
 #end
 #begin
 -- Truncate table
@@ -139,6 +232,7 @@ truncate table t1;
 truncate parent_table;
 truncate `#`;
 truncate `#!^%$`;
+truncate table tbl_without_pk nowait;
 #end
 #begin
 -- Create database
@@ -172,11 +266,14 @@ do begin update test.t2 set 1c = 1c + 1; end; -- //
 create index index1 on t1(col1) comment 'test index' comment 'some test' using btree;
 create unique index index2 using btree on t2(1c desc, `_` asc);
 create index index3 using hash on antlr_tokens(token(30) asc);
+create index index4 on t1(col1) nowait comment 'test index' using btree;
 create index ix_add_test_col1 on add_test(col1) comment 'test index' using btree;
 #end
 #begin
 create index myindex on t1(col1) comment 'test index' comment 'some test' using btree;
 create or replace index myindex on t1(col1) comment 'test index' comment 'some test' using btree;
+CREATE INDEX `idx_custom_field_30c4f4a7c529ccf0825b2fac732bebfd843ed764` ON `deals` ((cast(json_unquote(json_extract(`custom_fields`,_utf8mb4'$."30c4f4a7c529ccf0825b2fac732bebfd843ed764".value')) as double)));
+CREATE INDEX `idx_custom_field_d3bb7ad91ba729aaa20df0af037cb7ed8ce3ffc8` ON `deals` ((cast(json_unquote(json_extract(`custom_fields`,_utf8mb4'$."d3bb7ad91ba729aaa20df0af037cb7ed8ce3ffc8".value')) as float)));
 #end
 #begin
 -- Create logfile group
@@ -250,18 +347,24 @@ END
 create or replace trigger trg_my1 before delete on test.t1 for each row begin insert into log_table values ("delete row from test.t1"); insert into t4 values (old.col1, old.col1 + 5, old.col1 + 7); end; -- //-- delimiter ;
 #end
 #begin
+-- Create trigger 7
+-- delimiter //
+CREATE TRIGGER IF NOT EXISTS `my_trigger` BEFORE INSERT ON `my_table` FOR EACH ROW BEGIN SET NEW.my_col = CONCAT(NEW.mycol, NEW.id); END; -- //-- delimiter ;
+#end
+#begin
 -- Create view
 create or replace view my_view1 as select 1 union select 2 limit 0,5;
 create algorithm = merge view my_view2(col1, col2) as select * from t2 with check option;
 create or replace definer = 'ivan'@'%' view my_view3 as select count(*) from t3;
-create or replace definer = current_user sql security invoker view my_view4(c1, 1c, _, c1_2) 
+create or replace definer = current_user sql security invoker view my_view4(c1, 1c, _, c1_2)
 	as select * from  (t1 as tt1, t2 as tt2) inner join t1 on t1.col1 = tt1.col1;
+create view v_some_table as (with a as (select * from some_table) select * from a);
 
 #end
 #begin
 -- Create function
 -- delimiter //
-CREATE FUNCTION `func1`() RETURNS varchar(5) CHARSET utf8 COLLATE utf8_unicode_ci
+CREATE OR REPLACE FUNCTION `func1`() RETURNS varchar(5) CHARSET utf8 COLLATE utf8_unicode_ci
 BEGIN
 	RETURN '12345';
 END; -- //-- delimiter ;
@@ -281,7 +384,7 @@ RETURN
 #end
 #begin
 -- Use UTC_TIMESTAMP without parenthesis
-CREATE FUNCTION myfunc(a INT) RETURNS INT
+CREATE FUNCTION IF NOT EXISTS myfunc(a INT) RETURNS INT
 BEGIN
     DECLARE result INT;
     SET result = UTC_TIMESTAMP;
@@ -352,7 +455,8 @@ END -- //-- delimiter ;
 -- Create procedure
 -- delimiter //
 CREATE PROCEDURE doiterate(p1 INT)
-label2:BEGIN
+-- label which can be parsed as a beginning of IPv6 address
+aaa:BEGIN
   label1:LOOP
     SET p1 = p1 + 1;
     IF p1 < 10 THEN ITERATE label1; END IF;
@@ -426,9 +530,100 @@ BEGIN
 END; -- //-- delimiter ;
 #end
 #begin
+CREATE DEFINER=`prod_migrations`@`%` PROCEDURE `upsert_virtual_item`(IN name VARCHAR(45), IN type TINYINT UNSIGNED)
+BEGIN
+    SET @merchantId := (SELECT merchant_id FROM merchant LIMIT 1);
+    IF @merchantId > 0 THEN
+        SET @rows := (SELECT COUNT(*) FROM item WHERE item_type = type);
+        IF @rows > 0 THEN
+UPDATE item SET
+                merchant_id = @merchantId,
+                cz_title = name,
+                price = 0,
+                orderer = 2,
+                takeaway = 0,
+                currency_id = (
+                    SELECT currency_currency_id
+                    FROM merchant
+                    WHERE merchant_id = @merchantId
+                ),
+                tax_vat_id = (
+                    SELECT tax_vat.tax_vat_id
+                    FROM tax_vat
+                             JOIN merchant
+                                  ON merchant.place_country_id = tax_vat.country_id
+                                      AND merchant.merchant_id = @merchantId
+                    WHERE tax_vat.default = 1
+                ),
+                item_measure_id = 1,
+                kitchen_print = 0,
+                deleted = 0,
+                virtual = 1
+WHERE item_type = type;
+ELSE
+            INSERT INTO item SET
+                merchant_id = @merchantId,
+                cz_title = name,
+                price = 0,
+                orderer = 2,
+                takeaway = 0,
+                currency_id = (
+                    SELECT currency_currency_id
+                    FROM merchant
+                    WHERE merchant_id = @merchantId
+                ),
+                tax_vat_id = (
+                    SELECT tax_vat.tax_vat_id
+                    FROM tax_vat
+                    JOIN merchant
+                        ON merchant.place_country_id = tax_vat.country_id
+                        AND merchant.merchant_id = @merchantId
+                    WHERE tax_vat.default = 1
+                ),
+                item_measure_id = 1,
+                kitchen_print = 0,
+                deleted = 0,
+                virtual = 1,
+                item_type = type
+            ;
+END IF;
+END IF;
+END
+#end
+#begin
+CREATE PROCEDURE test_union()
+BEGIN
+(SELECT id FROM test_auto_inc)
+UNION ALL
+SELECT id FROM test_auto_inc;
+END
+#end
+#begin
+CREATE PROCEDURE test_union()
+BEGIN
+(SELECT id FROM test_auto_inc)
+UNION ALL
+SELECT id FROM test_auto_inc
+UNION ALL
+SELECT id FROM test_auto_inc ORDER BY id;
+END
+#end
+#begin
+CREATE PROCEDURE test_union()
+BEGIN
+(SELECT id FROM test_auto_inc)
+UNION ALL
+(SELECT id FROM test_auto_inc)
+UNION ALL
+SELECT id FROM test_auto_inc ORDER BY id;
+END
+#end
+#begin
 -- Create Role
 create role 'RL_COMPLIANCE_NSA';
 create role if not exists 'RL_COMPLIANCE_NSA';
+CREATE ROLE 'admin', 'developer';
+CREATE ROLE 'webapp'@'localhost';
 #end
 #begin
 CREATE VIEW view_with_cte1 AS
@@ -474,4 +669,203 @@ WITH RECURSIVE cte (n) AS
   SELECT n + 1 FROM cte WHERE n < 5
 )
 SELECT * FROM cte;
+#end
+
+#begin
+CREATE VIEW `invoice_payments_stats` AS
+SELECT
+    `i`.`id` AS `id`
+FROM (`invoices` `i` JOIN lateral (SELECT MAX(`ip`.`date`) AS `latest_payment` FROM `invoice_payments` `ip`) `ps`);
+#end
+
+#begin
+lock tables t1 read nowait;
+lock table t1 read local wait 100;
+#end
+
+-- Create sequence
+#begin
+CREATE SEQUENCE if NOT EXISTS workdb.s2 START=1 CYCLE MINVALUE=10000 MAXVALUE=999999999999;
+CREATE OR REPLACE SEQUENCE if NOT EXISTS s2 START=100 CACHE 1000;
+CREATE SEQUENCE `seq_8b4d1cdf-377e-4021-aef3-f7c9846903fc` INCREMENT BY 1 START WITH 1;
+#end
+
+#begin
+-- From MariaDB 10.1.2, pre-query variables are supported
+-- src: https://mariadb.com/kb/en/set-statement/
+SET STATEMENT max_statement_time=60 FOR CREATE TABLE some_table (val int);
+#end
+
+#begin
+-- Table Value Constructors
+-- https://dev.mysql.com/doc/refman/8.0/en/values.html
+CREATE OR REPLACE VIEW view_name AS
+WITH my_values(val1, val2) AS (
+    VALUES (1, 'One'),
+           (2, 'Two')
+)
+SELECT v.val1, v.val2 FROM my_values v;
+#end
+
+#begin
+CREATE DEFINER=`gpuser`@`%` PROCEDURE `test_parse_array` (IN val INT)
+BEGIN
+DECLARE array VARCHAR(50);
+
+SELECT 1;
+
+END
+#end
+
+#begin
+CREATE DEFINER=`peuser`@`%` PROCEDURE `test_utf`()
+BEGIN
+    SET @Ν_greece := 1, @N_latin := 'test';
+SELECT
+    @Ν_greece
+     ,@N_latin;
+END
+#end
+
+#begin
+CREATE PROCEDURE TEST_UPDATE()
+BEGIN
+    UPDATE TEST_AUTO_INC AI
+        JOIN TEST_JOIN_LIMIT JL ON JL.ID = AI.ID
+    SET AI.COL_1 = NULL
+    LIMIT 500;
+END
+#end
+
+#begin
+-- delimiter //
+CREATE DEFINER=`reportwriter`@`%` PROCEDURE `sp_ds_DAL_TX_Impoundment`(IN pDateFrom datetime, IN pDateTo datetime)
+BEGIN
+
+    SET @goliveDate = '2023-05-02 02:00:00';
+    set @pRegion = 'DAL-TX';
+-- set @pDateFrom = '2023-02-01 00:00:00';
+-- set @pDateTo = '2023-03-10 00:00:00';
+    set @pDateFrom = pDateFrom;
+    set @pDateTo = pDateTo;
+
+    set @contractAmount = 21.03;
+
+with
+Temp1 as
+(
+    select l.code                                                            as lotCode
+         , fi.Id                                                             AS FeeItemID
+         , fi.unitBillingPrice                                               as billingPrice
+         , eq.equipmentClass
+         , a.customerCode
+         , v.impoundStatus
+         , tc.companyCode                                                    AS impoundCompany
+         , b.companyCode                                                     AS towOperator
+         , v.id                                                              AS vehicleId
+         , re.reasoncode
+         , v.towReferenceNumber
+
+         , fn_CalculateTimeZoneOffset(regionCode, v.clearedDate, 'DISPLAY')  AS towDate
+         , fn_CalculateTimeZoneOffset(regionCode, v.releaseDate, 'DISPLAY')  AS releaseDate
+         , fn_CalculateTimeZoneOffset(regionCode, fi.createdDate, 'DISPLAY') AS feeDate
+
+         , f.code
+         , fi.totalBillingPricePretax
+
+    from ims_vehicle v
+             join ref_region r
+                  on v.regionId = r.regionId
+
+             INNER JOIN ims_fee_event fe ON v.id = fe.vehicleId
+             INNER JOIN ims_fee_item fi ON fe.id = fi.feeEventId
+             INNER JOIN ims_fee f ON fi.feeId = f.id
+             INNER JOIN ims_fee_category fc ON f.feeCategoryEnumCode = fc.enumcode
+
+             INNER JOIN ref_customer a ON v.accountId = a.customerId
+             INNER JOIN ref_reason re ON v.reasonId = re.reasonId
+             INNER JOIN ref_tow_company tc ON v.currentImpoundOperatorId = tc.towCompanyId
+
+             JOIN ref_tow_company b ON v.towOperatorId = b.towCompanyId
+             left join ref_lot l on v.currentLotId = l.id
+             join ref_equipment eq
+                  on v.equipmentId = eq.id
+
+    where r.regionCode = @pRegion
+      and v.releaseDate >= @pDateFrom
+      and v.releaseDate < @pDateTo
+      and v.clearedDate >= @goliveDate
+      and b.companyCode != 'ART-DAL-TX'
+      and v.impoundStatus = 'RELEASED'
+)
+
+    select lotCode
+         , Temp1.vehicleId         as "Vehicle ID"
+         , towReferenceNumber      as "Tow Reference Number"
+         , equipmentClass          as "Class"
+         , impoundStatus           as "Status"
+         , customerCode            as "Customer"
+         , impoundCompany          as "Impound Company"
+         , towOperator             as "Tow Operator"
+         , towDate                 as "Tow Date"
+         , releaseDate             as "Release Date"
+         , billingPrice            as "Auto Pound Authorized Fee"
+
+         , billingPrice - @contractAmount   as "rev threshold"
+
+-- ,DATEDIFF(s.timeTo, s.timeFrom) as "Storage Days"
+         , null                    as "Storage Days"
+         , null                    as timeFrom
+         , null                    as timeTo
+         , billingPrice            as "Authorized Impoundment Fee"
+
+         , (billingPrice - @contractAmount)/2 + @contractAmount as "rev share amount"
+    from Temp1
+
+    where code in ('ImpoundmentFee')
+      and lotCode like '%PEAKA%';
+
+END; -- //-- delimiter ;
+#end
+
+#begin
+CREATE DEFINER=`PEUSER`@`%` PROCEDURE `SANDBOX`.`TEST_UNION`( )
+BEGIN
+SELECT ID ,SUM(COL_1) AS SUM_COL_1
+FROM (
+    (SELECT ID ,COL_1 FROM TEST_AUTO_INC
+    UNION ALL
+    SELECT ID ,COL_1 FROM TEST_AUTO_INC TAI)
+    UNION ALL
+    (SELECT ID ,COL_1 FROM TEST_AUTO_INC TAI)
+)SS
+GROUP BY 1
+ORDER BY 1
+;
+END
+#end
+
+#begin
+CREATE TABLE `dailydata` (
+  `DATE` bigint(20) NOT NULL,
+  `ID` varchar(25) NOT NULL,
+  `OPEN` double DEFAULT NULL,
+  `HIGH` double DEFAULT NULL,
+  `LOW` double DEFAULT NULL,
+  `CLOSE` double DEFAULT NULL,
+  PRIMARY KEY (`ID`,`DATE`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci WITH SYSTEM VERSIONING
+PARTITION BY SYSTEM_TIME INTERVAL 1 DAY STARTS TIMESTAMP'2024-02-05 00:00:00' AUTO
+PARTITIONS 6
+#end
+#begin
+CREATE TABLE t1 (x int) WITH SYSTEM VERSIONING PARTITION BY SYSTEM_TIME LIMIT 1000 AUTO;
+#end
+#begin
+CREATE TABLE t1 (x int) WITH SYSTEM VERSIONING PARTITION BY SYSTEM_TIME INTERVAL 1 HOUR AUTO;
+#endif
+#begin
+CREATE TABLE t1 (x int) WITH SYSTEM VERSIONING
+  PARTITION BY SYSTEM_TIME INTERVAL 1 HOUR AUTO
+  (PARTITION p0 HISTORY, PARTITION pn CURRENT);
 #end

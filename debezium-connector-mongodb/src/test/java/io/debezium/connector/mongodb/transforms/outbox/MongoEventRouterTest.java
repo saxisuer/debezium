@@ -7,7 +7,7 @@ package io.debezium.connector.mongodb.transforms.outbox;
 
 import static io.debezium.connector.mongodb.MongoDbSchema.UPDATED_DESCRIPTION_SCHEMA;
 import static org.apache.kafka.connect.transforms.util.Requirements.requireStruct;
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -422,14 +422,13 @@ public class MongoEventRouterTest {
         final Schema valueSchema = SchemaBuilder.struct()
                 .name("event.Envelope")
                 .field(Envelope.FieldName.AFTER, Json.builder().optional().build())
-                // Oplog fields
-                .field(MongoDbFieldName.PATCH, Json.builder().optional().build())
-                .field(MongoDbFieldName.FILTER, Json.builder().optional().build())
                 // Change Streams field
                 .field(MongoDbFieldName.UPDATE_DESCRIPTION, UPDATED_DESCRIPTION_SCHEMA)
                 // .field(Envelope.FieldName.SOURCE, SchemaBuilder.struct().build())
                 .field(Envelope.FieldName.OPERATION, Schema.OPTIONAL_STRING_SCHEMA)
                 .field(Envelope.FieldName.TIMESTAMP, Schema.OPTIONAL_INT64_SCHEMA)
+                .field(Envelope.FieldName.TIMESTAMP_US, Schema.OPTIONAL_INT64_SCHEMA)
+                .field(Envelope.FieldName.TIMESTAMP_NS, Schema.OPTIONAL_INT64_SCHEMA)
                 .field(Envelope.FieldName.TRANSACTION, TransactionMonitor.TRANSACTION_BLOCK_SCHEMA)
                 .build();
 
@@ -480,14 +479,13 @@ public class MongoEventRouterTest {
         final Schema recordSchema = SchemaBuilder.struct()
                 .name("event.Envelope")
                 .field(Envelope.FieldName.AFTER, Json.builder().optional().build())
-                // Oplog fields
-                .field(MongoDbFieldName.PATCH, Json.builder().optional().build())
-                .field(MongoDbFieldName.FILTER, Json.builder().optional().build())
                 // Change Streams field
                 .field(MongoDbFieldName.UPDATE_DESCRIPTION, UPDATED_DESCRIPTION_SCHEMA)
                 // .field(Envelope.FieldName.SOURCE, SchemaBuilder.struct().build())
                 .field(Envelope.FieldName.OPERATION, Schema.OPTIONAL_STRING_SCHEMA)
                 .field(Envelope.FieldName.TIMESTAMP, Schema.OPTIONAL_INT64_SCHEMA)
+                .field(Envelope.FieldName.TIMESTAMP_US, Schema.OPTIONAL_INT64_SCHEMA)
+                .field(Envelope.FieldName.TIMESTAMP_NS, Schema.OPTIONAL_INT64_SCHEMA)
                 .field(Envelope.FieldName.TRANSACTION, TransactionMonitor.TRANSACTION_BLOCK_SCHEMA)
                 .build();
 
@@ -954,14 +952,13 @@ public class MongoEventRouterTest {
         final Schema valueSchema = SchemaBuilder.struct()
                 .name("event.Envelope")
                 .field(Envelope.FieldName.AFTER, Json.builder().optional().build())
-                // Oplog fields
-                .field(MongoDbFieldName.PATCH, Json.builder().optional().build())
-                .field(MongoDbFieldName.FILTER, Json.builder().optional().build())
                 // Change Streams field
                 .field(MongoDbFieldName.UPDATE_DESCRIPTION, UPDATED_DESCRIPTION_SCHEMA)
                 // .field(Envelope.FieldName.SOURCE, SchemaBuilder.struct().build())
                 .field(Envelope.FieldName.OPERATION, Schema.OPTIONAL_STRING_SCHEMA)
                 .field(Envelope.FieldName.TIMESTAMP, Schema.OPTIONAL_INT64_SCHEMA)
+                .field(Envelope.FieldName.TIMESTAMP_US, Schema.OPTIONAL_INT64_SCHEMA)
+                .field(Envelope.FieldName.TIMESTAMP_NS, Schema.OPTIONAL_INT64_SCHEMA)
                 .field(Envelope.FieldName.TRANSACTION, TransactionMonitor.TRANSACTION_BLOCK_SCHEMA)
                 .build();
 

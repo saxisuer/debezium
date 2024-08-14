@@ -5,6 +5,12 @@
  */
 package io.debezium.connector.mongodb;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.BDDMockito.given;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.mock;
+
 import java.util.Optional;
 
 import org.apache.kafka.connect.data.Schema;
@@ -12,6 +18,11 @@ import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
 import org.junit.Assert;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
+
+import io.debezium.config.Configuration;
+import io.debezium.config.Field;
+import io.debezium.data.Envelope;
 
 public class MongoDbConnectorConfigTest {
 
@@ -24,7 +35,7 @@ public class MongoDbConnectorConfigTest {
                 "\"data\":{\"data-collections\":[\"database.collection\"],\"type\":\"incremental\"}}");
         MongoDbConnectorConfig mongoDbConnectorConfig = new MongoDbConnectorConfig(TestHelper.getConfiguration());
 
-        Optional<String[]> resultOpt = mongoDbConnectorConfig.parseSignallingMessage(struct);
+        Optional<String[]> resultOpt = mongoDbConnectorConfig.parseSignallingMessage(struct, Envelope.FieldName.AFTER);
 
         Assert.assertTrue(resultOpt.isPresent());
         String[] result = resultOpt.get();
@@ -33,4 +44,52 @@ public class MongoDbConnectorConfigTest {
         Assert.assertEquals("execute-snapshot", result[1]);
         Assert.assertEquals("{\"data-collections\": [\"database.collection\"], \"type\": \"incremental\"}", result[2]);
     }
+
+    @Test
+    public void parseCursorPipeline() {
+        verifyCursorPipelineValidateError("This is not valid JSON pipeline",
+                "Change stream pipeline JSON is invalid: JSON reader was expecting a value but found 'This'.");
+        verifyCursorPipelineValidateError("{$match: {}}", "Change stream pipeline JSON is invalid: Cannot cast org.bson.Document to java.util.List");
+
+        verifyCursorPipelineValidateSuccess(null);
+        verifyCursorPipelineValidateSuccess("");
+        verifyCursorPipelineValidateSuccess("[]");
+        verifyCursorPipelineValidateSuccess("[{$match: {}}]");
+        verifyCursorPipelineValidateSuccess("[{\"$match\": { \"$and\": [{\"operationType\": \"insert\"}, {\"fullDocument.eventId\": 1404 }] } }]\n");
+    }
+
+    private static void verifyCursorPipelineValidateError(String value, String expectedError) {
+        verifyCursorPipelineValidate(value, expectedError, false);
+    }
+
+    private static void verifyCursorPipelineValidateSuccess(String value) {
+        verifyCursorPipelineValidate(value, null, true);
+    }
+
+    private static void verifyCursorPipelineValidate(String value, String expectedError, boolean success) {
+        // Given:
+        var config = mock(Configuration.class);
+        var output = mock(Field.ValidationOutput.class);
+        var errorMessage = ArgumentCaptor.forClass(String.class);
+        var field = MongoDbConnectorConfig.CURSOR_PIPELINE;
+        given(config.getString(field)).willReturn(value);
+
+        doNothing().when(output).accept(eq(field), eq(value), errorMessage.capture());
+
+        // When:
+        field.validate(config, output);
+
+        // Then:
+        if (success) {
+            assertThat(errorMessage.getAllValues())
+                    .isEmpty();
+        }
+        else {
+            assertThat(errorMessage.getAllValues())
+                    .hasSize(1)
+                    .element(0)
+                    .isEqualTo(expectedError);
+        }
+    }
+
 }

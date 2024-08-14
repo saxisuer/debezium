@@ -29,6 +29,7 @@ import io.debezium.data.Envelope.Operation;
 import io.debezium.function.Predicates;
 import io.debezium.pipeline.spi.ChangeRecordEmitter;
 import io.debezium.pipeline.spi.OffsetContext;
+import io.debezium.pipeline.spi.Partition;
 import io.debezium.relational.Column;
 import io.debezium.relational.ColumnEditor;
 import io.debezium.relational.RelationalChangeRecordEmitter;
@@ -37,6 +38,7 @@ import io.debezium.relational.TableEditor;
 import io.debezium.relational.TableId;
 import io.debezium.relational.TableSchema;
 import io.debezium.schema.DataCollectionSchema;
+import io.debezium.spi.schema.DataCollectionId;
 import io.debezium.util.Clock;
 import io.debezium.util.Strings;
 
@@ -59,7 +61,7 @@ public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter<P
     public PostgresChangeRecordEmitter(PostgresPartition partition, OffsetContext offset, Clock clock, PostgresConnectorConfig connectorConfig, PostgresSchema schema,
                                        PostgresConnection connection, TableId tableId,
                                        ReplicationMessage message) {
-        super(partition, offset, clock);
+        super(partition, offset, clock, connectorConfig);
 
         this.schema = schema;
         this.message = message;
@@ -179,7 +181,7 @@ public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter<P
                     cachedOldToastedValues.put(columnName, value);
                 }
                 else {
-                    if (value == UnchangedToastedReplicationMessageColumn.UNCHANGED_TOAST_VALUE) {
+                    if (UnchangedToastedReplicationMessageColumn.isUnchangedToastedValue(value)) {
                         final Object candidate = cachedOldToastedValues.get(columnName);
                         if (candidate != null) {
                             value = candidate;
@@ -234,8 +236,8 @@ public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter<P
         }
     }
 
-    static Optional<DataCollectionSchema> updateSchema(PostgresPartition partition, TableId tableId, ChangeRecordEmitter<PostgresPartition> changeRecordEmitter) {
-        return ((PostgresChangeRecordEmitter) changeRecordEmitter).newTable(tableId);
+    static Optional<DataCollectionSchema> updateSchema(Partition partition, DataCollectionId tableId, ChangeRecordEmitter<PostgresPartition> changeRecordEmitter) {
+        return ((PostgresChangeRecordEmitter) changeRecordEmitter).newTable((TableId) tableId);
     }
 
     private boolean schemaChanged(List<ReplicationMessage.Column> columns, Table table) {
@@ -375,4 +377,5 @@ public class PostgresChangeRecordEmitter extends RelationalChangeRecordEmitter<P
     protected boolean skipEmptyMessages() {
         return true;
     }
+
 }

@@ -18,21 +18,25 @@ import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.errors.DataException;
+import org.apache.kafka.connect.errors.SchemaBuilderException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.debezium.DebeziumException;
 import io.debezium.annotation.Immutable;
 import io.debezium.annotation.ThreadSafe;
+import io.debezium.config.CommonConnectorConfig.EventConvertingFailureHandlingMode;
 import io.debezium.data.Envelope;
 import io.debezium.data.SchemaUtil;
 import io.debezium.relational.Key.KeyMapper;
 import io.debezium.relational.Tables.ColumnNameFilter;
 import io.debezium.relational.mapping.ColumnMapper;
 import io.debezium.relational.mapping.ColumnMappers;
-import io.debezium.schema.FieldNameSelector;
 import io.debezium.schema.FieldNameSelector.FieldNamer;
-import io.debezium.util.SchemaNameAdjuster;
-import io.debezium.util.Strings;
+import io.debezium.schema.SchemaFactory;
+import io.debezium.schema.SchemaNameAdjuster;
+import io.debezium.spi.topic.TopicNamingStrategy;
+import io.debezium.util.Loggings;
 
 /**
  * Builder that constructs {@link TableSchema} instances for {@link Table} definitions.
@@ -57,9 +61,11 @@ public class TableSchemaBuilder {
     private final ValueConverterProvider valueConverterProvider;
     private final DefaultValueConverter defaultValueConverter;
     private final Schema sourceInfoSchema;
+    private final Schema transactionSchema;
     private final FieldNamer<Column> fieldNamer;
     private final CustomConverterRegistry customConverterRegistry;
     private final boolean multiPartitionMode;
+    private final EventConvertingFailureHandlingMode eventConvertingFailureHandlingMode;
 
     /**
      * Create a new instance of the builder.
@@ -72,9 +78,53 @@ public class TableSchemaBuilder {
                               SchemaNameAdjuster schemaNameAdjuster,
                               CustomConverterRegistry customConverterRegistry,
                               Schema sourceInfoSchema,
-                              boolean sanitizeFieldNames, boolean multiPartitionMode) {
+                              FieldNamer<Column> fieldNamer,
+                              boolean multiPartitionMode) {
         this(valueConverterProvider, null, schemaNameAdjuster,
-                customConverterRegistry, sourceInfoSchema, sanitizeFieldNames, multiPartitionMode);
+                customConverterRegistry, sourceInfoSchema, fieldNamer, multiPartitionMode, null);
+    }
+
+    public TableSchemaBuilder(ValueConverterProvider valueConverterProvider,
+                              SchemaNameAdjuster schemaNameAdjuster,
+                              CustomConverterRegistry customConverterRegistry,
+                              Schema sourceInfoSchema,
+                              Schema transactionSchema,
+                              FieldNamer<Column> fieldNamer,
+                              boolean multiPartitionMode) {
+        this(valueConverterProvider, null, schemaNameAdjuster,
+                customConverterRegistry, sourceInfoSchema, transactionSchema, fieldNamer,
+                multiPartitionMode, null);
+    }
+
+    /**
+     * Create a new instance of the builder.
+     *
+     * @param valueConverterProvider the provider for obtaining {@link ValueConverter}s and {@link SchemaBuilder}s; may not be
+     *            null
+     * @param schemaNameAdjuster the adjuster for schema names; may not be null
+     */
+    public TableSchemaBuilder(ValueConverterProvider valueConverterProvider,
+                              DefaultValueConverter defaultValueConverter,
+                              SchemaNameAdjuster schemaNameAdjuster,
+                              CustomConverterRegistry customConverterRegistry,
+                              Schema sourceInfoSchema,
+                              FieldNamer<Column> fieldNamer,
+                              boolean multiPartitionMode) {
+        this(valueConverterProvider, defaultValueConverter, schemaNameAdjuster,
+                customConverterRegistry, sourceInfoSchema, fieldNamer, multiPartitionMode, null);
+    }
+
+    public TableSchemaBuilder(ValueConverterProvider valueConverterProvider,
+                              DefaultValueConverter defaultValueConverter,
+                              SchemaNameAdjuster schemaNameAdjuster,
+                              CustomConverterRegistry customConverterRegistry,
+                              Schema sourceInfoSchema,
+                              FieldNamer<Column> fieldNamer,
+                              boolean multiPartitionMode,
+                              EventConvertingFailureHandlingMode eventConvertingFailureHandlingMode) {
+        this(valueConverterProvider, defaultValueConverter, schemaNameAdjuster,
+                customConverterRegistry, sourceInfoSchema, SchemaFactory.get().transactionBlockSchema(),
+                fieldNamer, multiPartitionMode, eventConvertingFailureHandlingMode);
     }
 
     /**
@@ -91,15 +141,20 @@ public class TableSchemaBuilder {
                               SchemaNameAdjuster schemaNameAdjuster,
                               CustomConverterRegistry customConverterRegistry,
                               Schema sourceInfoSchema,
-                              boolean sanitizeFieldNames, boolean multiPartitionMode) {
+                              Schema transactionSchema,
+                              FieldNamer<Column> fieldNamer,
+                              boolean multiPartitionMode,
+                              EventConvertingFailureHandlingMode eventConvertingFailureHandlingMode) {
         this.schemaNameAdjuster = schemaNameAdjuster;
         this.valueConverterProvider = valueConverterProvider;
         this.defaultValueConverter = Optional.ofNullable(defaultValueConverter)
                 .orElse(DefaultValueConverter.passthrough());
         this.sourceInfoSchema = sourceInfoSchema;
-        this.fieldNamer = FieldNameSelector.defaultSelector(sanitizeFieldNames);
+        this.transactionSchema = transactionSchema;
+        this.fieldNamer = fieldNamer;
         this.customConverterRegistry = customConverterRegistry;
         this.multiPartitionMode = multiPartitionMode;
+        this.eventConvertingFailureHandlingMode = eventConvertingFailureHandlingMode;
     }
 
     /**
@@ -110,24 +165,19 @@ public class TableSchemaBuilder {
      * <p>
      * This is equivalent to calling {@code create(table,false)}.
      *
-     * @param schemaPrefix the prefix added to the table identifier to construct the schema names; may be null if there is no
-     *            prefix
-     * @param envelopSchemaName the name of the schema of the built table's envelope
+     * @param topicNamingStrategy the topic naming strategy
      * @param table the table definition; may not be null
      * @param filter the filter that specifies whether columns in the table should be included; may be null if all columns
      *            are to be included
      * @param mappers the mapping functions for columns; may be null if none of the columns are to be mapped to different values
      * @return the table schema that can be used for sending rows of data for this table to Kafka Connect; never null
      */
-    public TableSchema create(String schemaPrefix, String envelopSchemaName, Table table, ColumnNameFilter filter, ColumnMappers mappers, KeyMapper keysMapper) {
-        if (schemaPrefix == null) {
-            schemaPrefix = "";
-        }
-
+    public TableSchema create(TopicNamingStrategy topicNamingStrategy, Table table, ColumnNameFilter filter, ColumnMappers mappers, KeyMapper keysMapper) {
         // Build the schemas ...
         final TableId tableId = table.id();
-        final String tableIdStr = tableSchemaName(tableId);
-        final String schemaNamePrefix = schemaPrefix + tableIdStr;
+        final String schemaNamePrefix = topicNamingStrategy.recordSchemaPrefix(tableId);
+        final String envelopeSchemaPrefix = topicNamingStrategy.dataChangeTopic(tableId);
+        final String envelopSchemaName = Envelope.schemaName(envelopeSchemaPrefix);
         LOGGER.debug("Mapping table '{}' to schemas under '{}'", tableId, schemaNamePrefix);
         SchemaBuilder valSchemaBuilder = SchemaBuilder.struct().name(schemaNameAdjuster.adjust(schemaNamePrefix + ".Value"));
         SchemaBuilder keySchemaBuilder = SchemaBuilder.struct().name(schemaNameAdjuster.adjust(schemaNamePrefix + ".Key"));
@@ -138,6 +188,9 @@ public class TableSchemaBuilder {
             addField(keySchemaBuilder, table, column, null);
             hasPrimaryKey.set(true);
         });
+        if (topicNamingStrategy.keySchemaAugment().augment(keySchemaBuilder)) {
+            hasPrimaryKey.set(true);
+        }
 
         table.columns()
                 .stream()
@@ -159,38 +212,19 @@ public class TableSchemaBuilder {
                 .withName(schemaNameAdjuster.adjust(envelopSchemaName))
                 .withRecord(valSchema)
                 .withSource(sourceInfoSchema)
+                .withTransaction(transactionSchema)
                 .build();
 
         // Create the generators ...
-        StructGenerator keyGenerator = createKeyGenerator(keySchema, tableId, tableKey.keyColumns());
+        StructGenerator keyGenerator = createKeyGenerator(keySchema, tableId, tableKey.keyColumns(), topicNamingStrategy);
         StructGenerator valueGenerator = createValueGenerator(valSchema, tableId, table.columns(), filter, mappers);
 
         // And the table schema ...
         return new TableSchema(tableId, keySchema, keyGenerator, envelope, valSchema, valueGenerator);
     }
 
-    /**
-     * Returns the type schema name for the given table.
-     */
-    private String tableSchemaName(TableId tableId) {
-        if (Strings.isNullOrEmpty(tableId.catalog())) {
-            if (Strings.isNullOrEmpty(tableId.schema())) {
-                return tableId.table();
-            }
-            else {
-                return tableId.schema() + "." + tableId.table();
-            }
-        }
-        else if (Strings.isNullOrEmpty(tableId.schema())) {
-            return tableId.catalog() + "." + tableId.table();
-        }
-        else if (multiPartitionMode) {
-            return tableId.catalog() + "." + tableId.schema() + "." + tableId.table();
-        }
-        // When both catalog and schema is present then only schema is used
-        else {
-            return tableId.schema() + "." + tableId.table();
-        }
+    public boolean isMultiPartitionMode() {
+        return multiPartitionMode;
     }
 
     /**
@@ -200,9 +234,11 @@ public class TableSchemaBuilder {
      *            will be null
      * @param columnSetName the name for the set of columns, used in error messages; may not be null
      * @param columns the column definitions for the table that defines the row; may not be null
+     * @param topicNamingStrategy the topic naming strategy
      * @return the key-generating function, or null if there is no key schema
      */
-    protected StructGenerator createKeyGenerator(Schema schema, TableId columnSetName, List<Column> columns) {
+    protected StructGenerator createKeyGenerator(Schema schema, TableId columnSetName, List<Column> columns,
+                                                 TopicNamingStrategy topicNamingStrategy) {
         if (schema != null) {
             int[] recordIndexes = indexesForColumns(columns);
             Field[] fields = fieldsForColumns(schema, columns);
@@ -225,11 +261,13 @@ public class TableSchemaBuilder {
                         }
                         catch (DataException e) {
                             Column col = columns.get(i);
-                            LOGGER.error("Failed to properly convert key value for '{}.{}' of type {} for row {}:",
-                                    columnSetName, col.name(), col.typeName(), row, e);
+                            Loggings.logErrorAndTraceRecord(LOGGER, row,
+                                    "Failed to properly convert key value for '{}.{}' of type {}", columnSetName,
+                                    col.name(), col.typeName(), e);
                         }
                     }
                 }
+                topicNamingStrategy.keyValueAugment().augment(columnSetName, schema, result);
                 return result;
             };
         }
@@ -285,26 +323,37 @@ public class TableSchemaBuilder {
 
                     if (converter != null) {
                         LOGGER.trace("converter for value object: *** {} ***", converter);
-                    }
-                    else {
-                        LOGGER.trace("converter is null...");
-                    }
-
-                    if (converter != null) {
                         try {
                             value = converter.convert(value);
                             result.put(fields[i], value);
                         }
-                        catch (DataException | IllegalArgumentException e) {
-                            Column col = columns.get(i);
-                            LOGGER.error("Failed to properly convert data value for '{}.{}' of type {} for row {}:",
-                                    tableId, col.name(), col.typeName(), row, e);
-                        }
                         catch (final Exception e) {
                             Column col = columns.get(i);
-                            LOGGER.error("Failed to properly convert data value for '{}.{}' of type {} for row {}:",
-                                    tableId, col.name(), col.typeName(), row, e);
+                            String message = "Failed to properly convert data value for '{}.{}' of type {}";
+                            if (eventConvertingFailureHandlingMode == null) {
+                                Loggings.logErrorAndTraceRecord(LOGGER, row,
+                                        message, tableId, col.name(), col.typeName(), e);
+                            }
+                            else {
+                                // NOTE: what if failed column is not accept null?
+                                switch (eventConvertingFailureHandlingMode) {
+                                    case FAIL:
+                                        Loggings.logErrorAndTraceRecord(LOGGER, row, message, tableId,
+                                                col.name(), col.typeName(), e);
+                                        throw new DebeziumException("Failed to properly convert data value for '" +
+                                                tableId + "." + col.name() + "' of type " + col.typeName(), e.getCause());
+                                    case WARN:
+                                        Loggings.logWarningAndTraceRecord(LOGGER, row, message, tableId,
+                                                col.name(), col.typeName(), e);
+                                    case SKIP:
+                                        Loggings.logDebugAndTraceRecord(LOGGER, row, message, tableId,
+                                                col.name(), col.typeName(), e);
+                                }
+                            }
                         }
+                    }
+                    else {
+                        LOGGER.trace("converter is null...");
                     }
                 }
                 return result;
@@ -387,9 +436,7 @@ public class TableSchemaBuilder {
      * @param mapper the mapping function for the column; may be null if the columns is not to be mapped to different values
      */
     protected void addField(SchemaBuilder builder, Table table, Column column, ColumnMapper mapper) {
-        final Object defaultValue = column.defaultValueExpression()
-                .flatMap(e -> defaultValueConverter.parseDefaultValue(column, e))
-                .orElse(null);
+        final Object defaultValue = parseDefaultValue(table.id(), column);
 
         final SchemaBuilder fieldBuilder = customConverterRegistry.registerConverterFor(table.id(), column, defaultValue)
                 .orElse(valueConverterProvider.schemaBuilder(column));
@@ -403,14 +450,25 @@ public class TableSchemaBuilder {
                 fieldBuilder.optional();
             }
 
+            if (column.comment() != null) {
+                fieldBuilder.doc(column.comment());
+            }
+
             // if the default value is provided
             if (column.hasDefaultValue() && defaultValue != null) {
-                // if the resolution of the default value resulted in null; there is no need to set it
-                // if the column isn't optional, the schema won't be set as such and therefore trying
-                // to set a null default value on a non-optional field schema will assert.
-                fieldBuilder
-                        .defaultValue(customConverterRegistry.getValueConverter(table.id(), column)
-                                .orElse(ValueConverter.passthrough()).convert(defaultValue));
+                try {
+                    // if the resolution of the default value resulted in null; there is no need to set it
+                    // if the column isn't optional, the schema won't be set as such and therefore trying
+                    // to set a null default value on a non-optional field schema will assert.
+                    fieldBuilder
+                            .defaultValue(customConverterRegistry.getValueConverter(table.id(), column)
+                                    .orElse(ValueConverter.passthrough()).convert(defaultValue));
+                }
+                catch (SchemaBuilderException e) {
+                    throw new DebeziumException("Failed to set field default value for '" + table.id() + "."
+                            + column.name() + "' of type " + column.typeName() + ", the default value is "
+                            + defaultValue + " of type " + defaultValue.getClass(), e);
+                }
             }
 
             builder.field(fieldNamer.fieldNameFor(column), fieldBuilder.build());
@@ -437,5 +495,40 @@ public class TableSchemaBuilder {
      */
     protected ValueConverter createValueConverterFor(TableId tableId, Column column, Field fieldDefn) {
         return customConverterRegistry.getValueConverter(tableId, column).orElse(valueConverterProvider.converter(column, fieldDefn));
+    }
+
+    // parse default value of column.
+    // if fail to parse, it's handled by value of eventConvertingFailureHandlingMode.
+    private Object parseDefaultValue(TableId tableId, Column column) {
+        try {
+            return column.defaultValueExpression()
+                    .flatMap(e -> defaultValueConverter.parseDefaultValue(column, e))
+                    .orElse(null);
+        }
+        catch (Exception e) {
+            String message = "Unexpected default value for JDBC type '{}.{}' and column '{}'";
+            if (eventConvertingFailureHandlingMode == null) {
+                Loggings.logErrorAndTraceRecord(LOGGER, column.defaultValueExpression(),
+                        message, column.typeName(), column.name(), e);
+            }
+            else {
+                switch (eventConvertingFailureHandlingMode) {
+                    case FAIL:
+                        Loggings.logErrorAndTraceRecord(LOGGER, column.defaultValueExpression(),
+                                message, tableId, column.typeName(), column.name(), e);
+                        throw new DebeziumException("Failed to properly convert default value for '" +
+                                tableId + "." + column.name() + "' of type " + column.typeName(), e.getCause());
+                    case WARN:
+                        Loggings.logWarningAndTraceRecord(LOGGER, column.defaultValueExpression(),
+                                message, tableId, column.typeName(), column.name(), e);
+                        return null;
+                    case SKIP:
+                        Loggings.logDebugAndTraceRecord(LOGGER, column.defaultValueExpression(),
+                                message, tableId, column.typeName(), column.name(), e);
+                        return null;
+                }
+            }
+        }
+        return null;
     }
 }

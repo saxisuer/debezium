@@ -5,17 +5,13 @@
  */
 package io.debezium.testing.system.tools.kafka;
 
-import static io.debezium.testing.system.tools.ConfigProperties.STRIMZI_KC_IMAGE;
-
 import java.util.Optional;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.debezium.testing.system.tools.AbstractOcpDeployer;
-import io.debezium.testing.system.tools.Deployer;
-import io.debezium.testing.system.tools.YAML;
-import io.debezium.testing.system.tools.kafka.builders.kafka.StrimziKafkaConnectBuilder;
+import io.debezium.testing.system.tools.kafka.builders.FabricKafkaConnectBuilder;
 import io.fabric8.kubernetes.api.model.ConfigMap;
 import io.fabric8.kubernetes.client.dsl.NonNamespaceOperation;
 import io.fabric8.kubernetes.client.dsl.Resource;
@@ -23,8 +19,8 @@ import io.fabric8.openshift.api.model.ImageStream;
 import io.fabric8.openshift.api.model.ImageStreamBuilder;
 import io.fabric8.openshift.client.OpenShiftClient;
 import io.strimzi.api.kafka.Crds;
-import io.strimzi.api.kafka.KafkaConnectList;
-import io.strimzi.api.kafka.model.KafkaConnect;
+import io.strimzi.api.kafka.model.connect.KafkaConnect;
+import io.strimzi.api.kafka.model.connect.KafkaConnectList;
 
 import okhttp3.OkHttpClient;
 
@@ -34,98 +30,21 @@ import okhttp3.OkHttpClient;
  */
 public class OcpKafkaConnectDeployer extends AbstractOcpDeployer<OcpKafkaConnectController> {
 
-    /**
-     * Builder for {@link OcpKafkaConnectDeployer}
-     */
-    public static class Builder implements Deployer.Builder<Builder, OcpKafkaConnectDeployer> {
-
-        private String project;
-        private OpenShiftClient ocpClient;
-        private OkHttpClient httpClient;
-        private ConfigMap configMap;
-        private StrimziOperatorController operatorController;
-        private final StrimziKafkaConnectBuilder strimziBuilder;
-
-        public Builder(StrimziKafkaConnectBuilder strimziBuilder) {
-            this.strimziBuilder = strimziBuilder;
-        }
-
-        public OcpKafkaConnectDeployer.Builder withProject(String project) {
-            this.project = project;
-            return this;
-        }
-
-        public OcpKafkaConnectDeployer.Builder withOcpClient(OpenShiftClient ocpClient) {
-            this.ocpClient = ocpClient;
-            return this;
-        }
-
-        public OcpKafkaConnectDeployer.Builder withHttpClient(OkHttpClient httpClient) {
-            this.httpClient = httpClient;
-            return this;
-        }
-
-        public OcpKafkaConnectDeployer.Builder withLoggingAndMetricsFromCfgMap(String cfgYamlPath) {
-            this.configMap = YAML.fromResource(cfgYamlPath, ConfigMap.class);
-            strimziBuilder
-                    .withLoggingFromConfigMap(configMap)
-                    .withMetricsFromConfigMap(configMap);
-            return this;
-        }
-
-        public OcpKafkaConnectDeployer.Builder withConnectorResources(boolean connectorResources) {
-            if (connectorResources) {
-                strimziBuilder.withConnectorResources();
-            }
-            return this;
-        }
-
-        public OcpKafkaConnectDeployer.Builder withOperatorController(StrimziOperatorController operatorController) {
-            this.operatorController = operatorController;
-            operatorController.getPullSecretName().ifPresent(strimziBuilder::withPullSecret);
-
-            return this;
-        }
-
-        @Override
-        public OcpKafkaConnectDeployer build() {
-            return new OcpKafkaConnectDeployer(
-                    project,
-                    strimziBuilder,
-                    configMap,
-                    operatorController,
-                    ocpClient,
-                    httpClient);
-        }
-
-        public Builder withKcBuild(boolean kcBuild) {
-            if (kcBuild) {
-                strimziBuilder
-                        .withBuild()
-                        .withStandardPlugins();
-            }
-            else {
-                strimziBuilder.withImage(STRIMZI_KC_IMAGE);
-            }
-            return this;
-        }
-    }
-
     private static final Logger LOGGER = LoggerFactory.getLogger(OcpKafkaConnectDeployer.class);
 
-    private final StrimziKafkaConnectBuilder strimziBuilder;
+    private final FabricKafkaConnectBuilder fabricBuilder;
     private final ConfigMap configMap;
     private final StrimziOperatorController operatorController;
 
-    private OcpKafkaConnectDeployer(
-                                    String project,
-                                    StrimziKafkaConnectBuilder strimziBuilder,
-                                    ConfigMap configMap,
-                                    StrimziOperatorController operatorController,
-                                    OpenShiftClient ocp,
-                                    OkHttpClient http) {
+    public OcpKafkaConnectDeployer(
+                                   String project,
+                                   FabricKafkaConnectBuilder fabricBuilder,
+                                   ConfigMap configMap,
+                                   StrimziOperatorController operatorController,
+                                   OpenShiftClient ocp,
+                                   OkHttpClient http) {
         super(project, ocp, http);
-        this.strimziBuilder = strimziBuilder;
+        this.fabricBuilder = fabricBuilder;
         this.configMap = configMap;
         this.operatorController = operatorController;
     }
@@ -142,11 +61,11 @@ public class OcpKafkaConnectDeployer extends AbstractOcpDeployer<OcpKafkaConnect
             deployConfigMap();
         }
 
-        if (strimziBuilder.hasBuild()) {
+        if (fabricBuilder.hasBuild()) {
             deployImageStream();
         }
 
-        KafkaConnect kafkaConnect = strimziBuilder.build();
+        KafkaConnect kafkaConnect = fabricBuilder.build();
         kafkaConnect = kafkaConnectOperation().createOrReplace(kafkaConnect);
 
         OcpKafkaConnectController controller = new OcpKafkaConnectController(
@@ -155,7 +74,6 @@ public class OcpKafkaConnectDeployer extends AbstractOcpDeployer<OcpKafkaConnect
                 ocp,
                 http);
         controller.waitForCluster();
-
         return controller;
 
     }
@@ -165,12 +83,12 @@ public class OcpKafkaConnectDeployer extends AbstractOcpDeployer<OcpKafkaConnect
     }
 
     private void deployImageStream() {
-        Optional<String> imageStream = strimziBuilder.imageStream();
+        Optional<String> imageStream = fabricBuilder.imageStream();
         if (!imageStream.isPresent()) {
             throw new IllegalStateException("Image stream missing");
         }
 
-        String[] image = strimziBuilder.imageStream().get().split(":", 2);
+        String[] image = fabricBuilder.imageStream().get().split(":", 2);
 
         ImageStream is = new ImageStreamBuilder()
                 .withNewMetadata().withName(image[0]).endMetadata()

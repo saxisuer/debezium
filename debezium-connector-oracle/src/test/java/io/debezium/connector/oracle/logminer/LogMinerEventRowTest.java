@@ -5,8 +5,8 @@
  */
 package io.debezium.connector.oracle.logminer;
 
-import static org.fest.assertions.Assertions.assertThat;
-import static org.fest.assertions.Fail.fail;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -183,7 +183,7 @@ public class LogMinerEventRowTest {
         char[] chars = new char[4000];
         Arrays.fill(chars, 'a');
         when(resultSet.getString(2)).thenReturn(new String(chars));
-        when(resultSet.getInt(6)).thenReturn(1);
+        when(resultSet.getInt(6)).thenReturn(1, 1, 1, 1, 1, 1, 1, 1, 1, 0);
 
         row = LogMinerEventRow.fromResultSet(resultSet, CATALOG_NAME, true);
         assertThat(row.getRedoSql().length()).isEqualTo(40_000);
@@ -195,7 +195,7 @@ public class LogMinerEventRowTest {
 
         row = LogMinerEventRow.fromResultSet(resultSet, CATALOG_NAME, true);
         assertThat(row.getRedoSql()).isNull();
-        verify(resultSet, times(13)).getInt(6);
+        verify(resultSet, times(14)).getInt(6);
         verify(resultSet, times(14)).getString(2);
 
         when(resultSet.getInt(6)).thenReturn(0);
@@ -203,8 +203,24 @@ public class LogMinerEventRowTest {
 
         assertThrows(resultSet, SQLException.class);
 
-        verify(resultSet, times(13)).getInt(6);
+        verify(resultSet, times(15)).getInt(6);
         verify(resultSet, times(15)).getString(2);
+    }
+
+    @Test
+    @FixFor("DBZ-3401")
+    public void testObjectIdAndVersionDetails() throws Exception {
+        when(resultSet.getLong(18)).thenReturn(1234567890L);
+        when(resultSet.getLong(19)).thenReturn(20L);
+        when(resultSet.getLong(20)).thenReturn(2345678901L);
+
+        LogMinerEventRow row = LogMinerEventRow.fromResultSet(resultSet, CATALOG_NAME, true);
+        assertThat(row.getObjectId()).isEqualTo(1234567890L);
+        assertThat(row.getObjectVersion()).isEqualTo(20L);
+        assertThat(row.getDataObjectId()).isEqualTo(2345678901L);
+        verify(resultSet).getLong(18);
+        verify(resultSet).getLong(19);
+        verify(resultSet).getLong(20);
     }
 
     private static <T extends Throwable, R> void assertThrows(ResultSet rs, Class<T> throwAs) {

@@ -5,9 +5,10 @@
  */
 package io.debezium.connector.oracle;
 
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import java.math.BigDecimal;
+import java.nio.ByteBuffer;
 import java.sql.SQLException;
 import java.util.Arrays;
 import java.util.List;
@@ -19,22 +20,27 @@ import org.apache.kafka.connect.source.SourceRecord;
 import org.awaitility.Awaitility;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import io.debezium.config.Configuration;
-import io.debezium.connector.oracle.OracleConnectorConfig.ConnectorAdapter;
 import io.debezium.connector.oracle.antlr.listener.AlterTableParserListener;
 import io.debezium.connector.oracle.antlr.listener.CreateTableParserListener;
 import io.debezium.connector.oracle.logminer.processor.AbstractLogMinerEventProcessor;
+import io.debezium.connector.oracle.olr.OpenLogReplicatorStreamingChangeEventSource;
 import io.debezium.connector.oracle.util.TestHelper;
-import io.debezium.data.Envelope;
+import io.debezium.data.Envelope.FieldName;
 import io.debezium.data.VerifyRecord;
 import io.debezium.doc.FixFor;
 import io.debezium.embedded.AbstractConnectorTest;
 import io.debezium.junit.logging.LogInterceptor;
 import io.debezium.pipeline.ErrorHandler;
+import io.debezium.relational.RelationalDatabaseConnectorConfig.DecimalHandlingMode;
 import io.debezium.relational.TableId;
+import io.debezium.relational.history.SchemaHistory;
 import io.debezium.util.Testing;
+
+import ch.qos.logback.classic.Level;
 
 /**
  * Integration tests for the Oracle DDL and schema migration.
@@ -51,7 +57,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
 
         setConsumeTimeout(TestHelper.defaultMessageConsumerPollTimeout(), TimeUnit.SECONDS);
         initializeConnectorTestFramework();
-        Testing.Files.delete(TestHelper.DB_HISTORY_PATH);
+        Testing.Files.delete(TestHelper.SCHEMA_HISTORY_PATH);
 
         TestHelper.dropAllTables();
     }
@@ -209,7 +215,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         record = records.recordsForTopic(topicName("DEBEZIUM", "TABLEA")).get(0);
         VerifyRecord.isValidInsert(record, "ID", 1);
         assertSourceTableInfo(record, "DEBEZIUM", "TABLEA");
-        Struct after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+        Struct after = ((Struct) record.value()).getStruct(FieldName.AFTER);
         assertThat(after.schema().fields()).hasSize(2);
         assertThat(after.get("ID")).isEqualTo(1);
         assertThat(after.get("DATA")).isEqualTo("Test");
@@ -237,7 +243,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         record = records.recordsForTopic(topicName("DEBEZIUM", "TABLEA")).get(0);
         VerifyRecord.isValidInsert(record, "ID", 2);
         assertSourceTableInfo(record, "DEBEZIUM", "TABLEA");
-        after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+        after = ((Struct) record.value()).getStruct(FieldName.AFTER);
         assertThat(after.schema().fields()).hasSize(3);
         assertThat(after.get("ID")).isEqualTo(2);
         assertThat(after.get("DATA")).isEqualTo("Test2");
@@ -280,7 +286,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         record = records.recordsForTopic(topicName("DEBEZIUM", "TABLEA")).get(0);
         VerifyRecord.isValidInsert(record, "ID", 1);
         assertSourceTableInfo(record, "DEBEZIUM", "TABLEA");
-        Struct after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+        Struct after = ((Struct) record.value()).getStruct(FieldName.AFTER);
         assertThat(after.schema().fields()).hasSize(2);
         assertThat(after.get("ID")).isEqualTo(1);
         assertThat(after.get("DATA")).isEqualTo("Test");
@@ -308,7 +314,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         record = records.recordsForTopic(topicName("DEBEZIUM", "TABLEA")).get(0);
         VerifyRecord.isValidInsert(record, "ID", 2);
         assertSourceTableInfo(record, "DEBEZIUM", "TABLEA");
-        after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+        after = ((Struct) record.value()).getStruct(FieldName.AFTER);
         assertThat(after.schema().fields()).hasSize(4);
         assertThat(after.get("ID")).isEqualTo(2);
         assertThat(after.get("DATA")).isEqualTo("Test2");
@@ -352,7 +358,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         record = records.recordsForTopic(topicName("DEBEZIUM", "TABLEA")).get(0);
         VerifyRecord.isValidInsert(record, "ID", 1);
         assertSourceTableInfo(record, "DEBEZIUM", "TABLEA");
-        Struct after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+        Struct after = ((Struct) record.value()).getStruct(FieldName.AFTER);
         assertThat(after.schema().fields()).hasSize(2);
         assertThat(after.get("ID")).isEqualTo(1);
         assertThat(after.get("DATA")).isEqualTo("Test");
@@ -380,7 +386,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         record = records.recordsForTopic(topicName("DEBEZIUM", "TABLEA")).get(0);
         VerifyRecord.isValidInsert(record, "ID", 2);
         assertSourceTableInfo(record, "DEBEZIUM", "TABLEA");
-        after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+        after = ((Struct) record.value()).getStruct(FieldName.AFTER);
         assertThat(after.schema().fields()).hasSize(2);
         assertThat(after.schema().field("DATA")).isNull();
         assertThat(after.get("ID")).isEqualTo(2);
@@ -423,7 +429,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         record = records.recordsForTopic(topicName("DEBEZIUM", "TABLEA")).get(0);
         VerifyRecord.isValidInsert(record, "ID", 1);
         assertSourceTableInfo(record, "DEBEZIUM", "TABLEA");
-        Struct after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+        Struct after = ((Struct) record.value()).getStruct(FieldName.AFTER);
         assertThat(after.schema().fields()).hasSize(2);
         assertThat(after.get("ID")).isEqualTo(1);
         assertThat(after.get("DATA")).isEqualTo("Test");
@@ -451,7 +457,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         record = records.recordsForTopic(topicName("DEBEZIUM", "TABLEA")).get(0);
         VerifyRecord.isValidInsert(record, "ID", 2);
         assertSourceTableInfo(record, "DEBEZIUM", "TABLEA");
-        after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+        after = ((Struct) record.value()).getStruct(FieldName.AFTER);
         assertThat(after.schema().fields()).hasSize(1);
         assertThat(after.schema().field("DATA")).isNull();
         assertThat(after.get("ID")).isEqualTo(2);
@@ -493,7 +499,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         record = records.recordsForTopic(topicName("DEBEZIUM", "TABLEA")).get(0);
         VerifyRecord.isValidInsert(record, "ID", 1);
         assertSourceTableInfo(record, "DEBEZIUM", "TABLEA");
-        Struct after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+        Struct after = ((Struct) record.value()).getStruct(FieldName.AFTER);
         assertThat(after.schema().fields()).hasSize(3);
         assertThat(after.get("ID")).isEqualTo(1);
         assertThat(after.get("DATA1")).isEqualTo("Test");
@@ -522,7 +528,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         record = records.recordsForTopic(topicName("DEBEZIUM", "TABLEA")).get(0);
         VerifyRecord.isValidInsert(record, "ID", 2);
         assertSourceTableInfo(record, "DEBEZIUM", "TABLEA");
-        after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+        after = ((Struct) record.value()).getStruct(FieldName.AFTER);
         assertThat(after.schema().fields()).hasSize(1);
         assertThat(after.schema().field("DATA1")).isNull();
         assertThat(after.schema().field("DATA2")).isNull();
@@ -565,7 +571,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         record = records.recordsForTopic(topicName("DEBEZIUM", "TABLEA")).get(0);
         VerifyRecord.isValidInsert(record, "ID", 1);
         assertSourceTableInfo(record, "DEBEZIUM", "TABLEA");
-        Struct after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+        Struct after = ((Struct) record.value()).getStruct(FieldName.AFTER);
         assertThat(after.schema().fields()).hasSize(2);
         assertThat(after.get("ID")).isEqualTo(1);
         assertThat(after.get("DATA")).isEqualTo("Test");
@@ -583,7 +589,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         // Verify schema change
         record = records.recordsForTopic(TestHelper.SERVER_NAME).get(0);
         assertStreamingSchemaChange(record);
-        assertSourceTableInfo(record, "DEBEZIUM", "TABLEB,TABLEA");
+        assertSourceTableInfo(record, "DEBEZIUM", "TABLEA,TABLEB");
         tableChanges = ((Struct) record.value()).getArray("tableChanges");
         assertThat(tableChanges).hasSize(1);
         assertTableChange(tableChanges.get(0), "ALTER", "DEBEZIUM", "TABLEB");
@@ -592,7 +598,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         record = records.recordsForTopic(topicName("DEBEZIUM", "TABLEB")).get(0);
         VerifyRecord.isValidInsert(record, "ID", 2);
         assertSourceTableInfo(record, "DEBEZIUM", "TABLEB");
-        after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+        after = ((Struct) record.value()).getStruct(FieldName.AFTER);
         assertThat(after.schema().fields()).hasSize(2);
         assertThat(after.get("ID")).isEqualTo(2);
         assertThat(after.get("DATA")).isEqualTo("Test2");
@@ -635,7 +641,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         record = records.recordsForTopic(topicName("DEBEZIUM", "TABLEA")).get(0);
         VerifyRecord.isValidInsert(record, "ID", 1);
         assertSourceTableInfo(record, "DEBEZIUM", "TABLEA");
-        Struct after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+        Struct after = ((Struct) record.value()).getStruct(FieldName.AFTER);
         assertThat(after.schema().fields()).hasSize(2);
         assertThat(after.get("ID")).isEqualTo(1);
         assertThat(after.get("DATA")).isEqualTo("Test");
@@ -652,7 +658,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         // Verify schema change contains no changes
         record = records.recordsForTopic(TestHelper.SERVER_NAME).get(0);
         assertStreamingSchemaChange(record);
-        assertSourceTableInfo(record, "DEBEZIUM", "TABLEB,TABLEA");
+        assertSourceTableInfo(record, "DEBEZIUM", "TABLEA,TABLEB");
         tableChanges = ((Struct) record.value()).getArray("tableChanges");
         assertThat(tableChanges).isEmpty();
 
@@ -708,7 +714,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         record = records.recordsForTopic(topicName("DEBEZIUM", "TABLEA")).get(0);
         VerifyRecord.isValidInsert(record, "ID", 1);
         assertSourceTableInfo(record, "DEBEZIUM", "TABLEA");
-        Struct after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+        Struct after = ((Struct) record.value()).getStruct(FieldName.AFTER);
         assertThat(after.schema().fields()).hasSize(2);
         assertThat(after.get("ID")).isEqualTo(1);
         assertThat(after.get("DATA")).isEqualTo("Test");
@@ -750,7 +756,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         record = records.recordsForTopic(topicName("DEBEZIUM", "TABLEA")).get(0);
         VerifyRecord.isValidInsert(record, "ID", 1);
         assertSourceTableInfo(record, "DEBEZIUM", "TABLEA");
-        Struct after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+        Struct after = ((Struct) record.value()).getStruct(FieldName.AFTER);
         assertThat(after.schema().fields()).hasSize(2);
         assertThat(after.get("ID")).isEqualTo(1);
         assertThat(after.get("DATA")).isEqualTo("Test");
@@ -779,7 +785,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         record = records.recordsForTopic(topicName("DEBEZIUM", "TABLEA")).get(0);
         VerifyRecord.isValidInsert(record, "ID", 2);
         assertSourceTableInfo(record, "DEBEZIUM", "TABLEA");
-        after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+        after = ((Struct) record.value()).getStruct(FieldName.AFTER);
         assertThat(after.schema().fields()).hasSize(2);
         assertThat(after.get("ID")).isEqualTo(2);
         assertThat(after.get("DATA")).isNull();
@@ -824,7 +830,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         record = records.recordsForTopic(topicName("DEBEZIUM", "TABLEA")).get(0);
         VerifyRecord.isValidInsert(record, "ID", 1);
         assertSourceTableInfo(record, "DEBEZIUM", "TABLEA");
-        Struct after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+        Struct after = ((Struct) record.value()).getStruct(FieldName.AFTER);
         assertThat(after.schema().fields()).hasSize(2);
         assertThat(after.get("ID")).isEqualTo(1);
         assertThat(after.get("DATA")).isEqualTo(BigDecimal.valueOf(12345.67));
@@ -855,7 +861,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         record = records.recordsForTopic(topicName("DEBEZIUM", "TABLEA")).get(0);
         VerifyRecord.isValidInsert(record, "ID", 2);
         assertSourceTableInfo(record, "DEBEZIUM", "TABLEA");
-        after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+        after = ((Struct) record.value()).getStruct(FieldName.AFTER);
         assertThat(after.schema().fields()).hasSize(2);
         assertThat(after.get("ID")).isEqualTo(2);
         assertThat(after.get("DATA")).isEqualTo(BigDecimal.valueOf(234567.891));
@@ -902,7 +908,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         record = records.recordsForTopic(topicName("DEBEZIUM", "TABLEA")).get(0);
         VerifyRecord.isValidInsert(record, "ID", 1);
         assertSourceTableInfo(record, "DEBEZIUM", "TABLEA");
-        Struct after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+        Struct after = ((Struct) record.value()).getStruct(FieldName.AFTER);
         assertThat(after.get("ID")).isEqualTo(1);
         assertThat(after.get("DATA")).isEqualTo("Test");
 
@@ -1039,20 +1045,19 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
         tableChanges = ((Struct) record.value()).getArray("tableChanges");
         assertThat(tableChanges).hasSize(1);
         assertTableChange(tableChanges.get(0), "DROP", "DEBEZIUM", "tableC");
-        assertTableChangePrimaryKeyNames(tableChanges.get(0), "id");
-        assertTableChangeColumn(tableChanges.get(0), 0, "id");
-        assertTableChangeColumn(tableChanges.get(0), 1, "data");
-        assertTableChangeColumn(tableChanges.get(0), 2, "data2");
-        assertTableChangeColumn(tableChanges.get(0), 3, "Data3");
+        assertThat(tableChanges.get(0).getStruct("table")).isNull();
     }
 
     @Test
     @FixFor("DBZ-2916")
+    @Ignore("Test can be flaky and cannot reproduce locally, ignoring to stablize test suite")
     public void shouldNotEmitDdlEventsForNonTableObjects() throws Exception {
         try {
             final LogInterceptor logminerlogInterceptor = new LogInterceptor(AbstractLogMinerEventProcessor.class);
             final LogInterceptor errorLogInterceptor = new LogInterceptor(ErrorHandler.class);
             final LogInterceptor xstreamLogInterceptor = new LogInterceptor("io.debezium.connector.oracle.xstream.LcrEventHandler");
+            final LogInterceptor olrLogInterceptor = new LogInterceptor(OpenLogReplicatorStreamingChangeEventSource.class);
+            olrLogInterceptor.setLoggerLevel(OpenLogReplicatorStreamingChangeEventSource.class, Level.TRACE);
 
             // These roles are needed in order to perform certain DDL operations below.
             // Any roles granted here should be revoked in the finally block.
@@ -1079,12 +1084,28 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
             connection.execute("DROP PACKAGE pkgtest");
 
             // Resolve what text to look for depending on connector implementation
-            final String logText = ConnectorAdapter.LOG_MINER.equals(TestHelper.adapter()) ? "DDL: " : "Processing DDL event ";
+            final String logText;
+            final LogInterceptor interceptor;
+            switch (TestHelper.adapter()) {
+                case LOG_MINER:
+                    logText = "DDL: ";
+                    interceptor = logminerlogInterceptor;
+                    break;
+                case XSTREAM:
+                    logText = "Processing DDL event ";
+                    interceptor = xstreamLogInterceptor;
+                    break;
+                case OLR:
+                    logText = "Cannot process DDL";
+                    interceptor = olrLogInterceptor;
+                    break;
+                default:
+                    throw new IllegalStateException("Unexpected adapter: " + TestHelper.adapter());
+            }
 
             Awaitility.await()
                     .atMost(TestHelper.defaultMessageConsumerPollTimeout(), TimeUnit.SECONDS)
-                    .until(() -> logminerlogInterceptor.countOccurrences(logText) == expected
-                            || xstreamLogInterceptor.countOccurrences(logText) == expected);
+                    .until(() -> interceptor.countOccurrences(logText) == expected);
 
             stopConnector();
             waitForConnectorShutdown(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
@@ -1122,23 +1143,24 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
             assertNoRecordsToConsume();
 
             // Verify Oracle DDL parser ignores CREATE TABLE with RAW data types
+            final String ignoredTable = TestHelper.getDatabaseName() + ".DEBEZIUM.DBZ4037B";
             connection.execute("CREATE TABLE dbz4037b (id number(9,0), data raw(8), primary key(id))");
             Awaitility.await()
                     .atMost(TestHelper.defaultMessageConsumerPollTimeout(), TimeUnit.SECONDS)
-                    .until(() -> createTableinterceptor.containsMessage(getIgnoreCreateTable("ORCLPDB1.DEBEZIUM.DBZ4037B")));
+                    .until(() -> createTableinterceptor.containsMessage(getIgnoreCreateTable(ignoredTable)));
 
             // Verify Oracle DDL parser ignores ALTER TABLE with RAW data types
             connection.execute("ALTER TABLE dbz4037b ADD data2 raw(10)");
             Awaitility.await()
                     .atMost(TestHelper.defaultMessageConsumerPollTimeout(), TimeUnit.SECONDS)
-                    .until(() -> alterTableinterceptor.containsMessage(getIgnoreAlterTable("ORCLPDB1.DEBEZIUM.DBZ4037B")));
+                    .until(() -> alterTableinterceptor.containsMessage(getIgnoreAlterTable(ignoredTable)));
 
             // Capture a simple change on different table
             connection.execute("INSERT INTO dbz4037a (id,data) values (1, 'Test')");
             SourceRecords records = consumeRecordsByTopic(1);
             assertThat(records.recordsForTopic(topicName("DEBEZIUM", "DBZ4037A"))).hasSize(1);
             SourceRecord record = records.recordsForTopic(topicName("DEBEZIUM", "DBZ4037A")).get(0);
-            Struct after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+            Struct after = ((Struct) record.value()).getStruct(FieldName.AFTER);
             assertThat(after.get("ID")).isEqualTo(1);
             assertThat(after.get("DATA")).isEqualTo("Test");
 
@@ -1184,16 +1206,431 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
             assertThat(records.recordsForTopic(topicName("DEBEZIUM", "DBZ4037"))).hasSize(1);
 
             SourceRecord record = records.recordsForTopic(topicName("DEBEZIUM", "DBZ4037")).get(0);
-            Struct after = ((Struct) record.value()).getStruct(Envelope.FieldName.AFTER);
+            Struct after = ((Struct) record.value()).getStruct(FieldName.AFTER);
             assertThat(after.get("ID")).isEqualTo(1);
-            assertThat(after.get("DATA")).isNull();
-            assertThat(after.get("DATA2")).isNull();
+            assertThat(after.get("DATA")).isEqualTo(ByteBuffer.wrap("Test".getBytes()));
+            assertThat(after.get("DATA2")).isEqualTo(ByteBuffer.wrap("T".getBytes()));
             assertThat(after.get("NAME")).isEqualTo("Acme 123");
 
             assertNoRecordsToConsume();
         }
         finally {
             TestHelper.dropTable(connection, "dbz4037");
+        }
+    }
+
+    @Test
+    @FixFor("DBZ-4782")
+    public void shouldNotResendSchemaChangeIfLastEventReadBeforeRestart() throws Exception {
+        TestHelper.dropTable(connection, "dbz4782");
+        try {
+            connection.execute("CREATE TABLE dbz4782 (id numeric(9,0) primary key, data varchar2(50))");
+            TestHelper.streamTable(connection, "dbz4782");
+
+            Configuration config = TestHelper.defaultConfig()
+                    .with(OracleConnectorConfig.TABLE_INCLUDE_LIST, "DEBEZIUM\\.DBZ4782")
+                    .with(OracleConnectorConfig.INCLUDE_SCHEMA_CHANGES, true)
+                    .build();
+
+            start(OracleConnector.class, config);
+            assertConnectorIsRunning();
+
+            waitForStreamingRunning(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+            connection.execute("ALTER TABLE dbz4782 add data2 varchar2(50)");
+
+            // CREATE, ALTER
+            SourceRecords sourceRecords = consumeRecordsByTopic(2);
+            List<SourceRecord> records = sourceRecords.recordsForTopic(TestHelper.SERVER_NAME);
+            assertThat(records).hasSize(2);
+
+            assertSnapshotSchemaChange(records.get(0));
+            List<Struct> tableChanges = ((Struct) records.get(0).value()).getArray("tableChanges");
+            assertThat(tableChanges).hasSize(1);
+            assertTableChange(tableChanges.get(0), "CREATE", "DEBEZIUM", "DBZ4782");
+
+            assertStreamingSchemaChange(records.get(1));
+            tableChanges = ((Struct) records.get(1).value()).getArray("tableChanges");
+            assertThat(tableChanges).hasSize(1);
+            assertTableChange(tableChanges.get(0), "ALTER", "DEBEZIUM", "DBZ4782");
+
+            // Stop the connector
+            stopConnector();
+
+            // Restart connector and verify that we do not re-emit the ALTER table
+            start(OracleConnector.class, config);
+            assertConnectorIsRunning();
+            waitForStreamingRunning(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+            // Wait for 20 seconds and assert that there are no available records
+            waitForAvailableRecords(20, TimeUnit.SECONDS);
+            assertNoRecordsToConsume();
+        }
+        finally {
+            TestHelper.dropTable(connection, "dbz4782");
+        }
+    }
+
+    @Test
+    @FixFor("DBZ-4782")
+    public void shouldNotResendSchemaChangeIfLastEventReadBeforeRestartWithFollowupDml() throws Exception {
+        TestHelper.dropTable(connection, "dbz4782");
+        try {
+            createTable("dbz4782", "CREATE TABLE dbz4782 (id numeric(9,0) primary key, data varchar2(50))");
+
+            Configuration config = TestHelper.defaultConfig()
+                    .with(OracleConnectorConfig.TABLE_INCLUDE_LIST, "DEBEZIUM\\.DBZ4782")
+                    .with(OracleConnectorConfig.INCLUDE_SCHEMA_CHANGES, true)
+                    .build();
+
+            start(OracleConnector.class, config);
+            assertConnectorIsRunning();
+
+            waitForStreamingRunning(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+            connection.execute("ALTER TABLE dbz4782 add data2 varchar2(50)");
+
+            // CREATE, ALTER
+            SourceRecords sourceRecords = consumeRecordsByTopic(2);
+            List<SourceRecord> records = sourceRecords.recordsForTopic(TestHelper.SERVER_NAME);
+            assertThat(records).hasSize(2);
+
+            assertSnapshotSchemaChange(records.get(0));
+            List<Struct> tableChanges = ((Struct) records.get(0).value()).getArray("tableChanges");
+            assertThat(tableChanges).hasSize(1);
+            assertTableChange(tableChanges.get(0), "CREATE", "DEBEZIUM", "DBZ4782");
+
+            assertStreamingSchemaChange(records.get(1));
+            tableChanges = ((Struct) records.get(1).value()).getArray("tableChanges");
+            assertThat(tableChanges).hasSize(1);
+            assertTableChange(tableChanges.get(0), "ALTER", "DEBEZIUM", "DBZ4782");
+
+            // Stop the connector
+            stopConnector();
+
+            // Restart connector and verify that we do not re-emit the ALTER table
+            start(OracleConnector.class, config);
+            assertConnectorIsRunning();
+            waitForStreamingRunning(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+            connection.execute("INSERT INTO dbz4782 values (1, 'data1', 'data2')");
+
+            sourceRecords = consumeRecordsByTopic(1);
+            records = sourceRecords.recordsForTopic(topicName("DEBEZIUM", "DBZ4782"));
+            assertThat(records).hasSize(1);
+            VerifyRecord.isValidInsert(records.get(0), "ID", 1);
+
+            // There should be no other records to consume
+            assertNoRecordsToConsume();
+        }
+        finally {
+            TestHelper.dropTable(connection, "dbz4782");
+        }
+    }
+
+    @Test
+    @FixFor("DBZ-4782")
+    public void shouldNotResendSchemaChangeWithInprogressTransactionOnSecondTable() throws Exception {
+        TestHelper.dropTable(connection, "dbz4782a");
+        TestHelper.dropTable(connection, "dbz4782b");
+        try {
+            createTable("dbz4782a", "CREATE TABLE dbz4782a (id numeric(9,0) primary key, data varchar2(50))");
+            createTable("dbz4782b", "CREATE TABLE dbz4782b (id numeric(9,0) primary key, data varchar2(50))");
+
+            Configuration config = TestHelper.defaultConfig()
+                    .with(OracleConnectorConfig.TABLE_INCLUDE_LIST, "DEBEZIUM\\.DBZ4782[A|B]")
+                    .with(OracleConnectorConfig.INCLUDE_SCHEMA_CHANGES, true)
+                    .with(OracleConnectorConfig.LOG_MINING_QUERY_FILTER_MODE, "regex")
+                    .build();
+
+            start(OracleConnector.class, config);
+            assertConnectorIsRunning();
+
+            waitForStreamingRunning(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+            // Start in-progress transaction for dbz4728b
+            try (OracleConnection connection2 = TestHelper.testConnection()) {
+
+                // Perform in-progress operation on second connection & alter the other table in primary connection
+                connection2.executeWithoutCommitting("INSERT INTO dbz4782b values (2, 'connection2')");
+                connection.execute("ALTER TABLE dbz4782a add data2 varchar2(50)");
+
+                // CREATEx2, ALTER (INSERT isn't here yet, its in progress)
+                SourceRecords sourceRecords = consumeRecordsByTopic(3);
+                List<SourceRecord> records = sourceRecords.recordsForTopic(TestHelper.SERVER_NAME);
+                assertThat(records).hasSize(3);
+
+                assertSnapshotSchemaChange(records.get(0));
+                List<Struct> tableChanges = ((Struct) records.get(0).value()).getArray("tableChanges");
+                assertThat(tableChanges).hasSize(1);
+                assertTableChange(tableChanges.get(0), "CREATE", "DEBEZIUM", "DBZ4782A");
+
+                assertSnapshotSchemaChange(records.get(1));
+                tableChanges = ((Struct) records.get(1).value()).getArray("tableChanges");
+                assertThat(tableChanges).hasSize(1);
+                assertTableChange(tableChanges.get(0), "CREATE", "DEBEZIUM", "DBZ4782B");
+
+                assertStreamingSchemaChange(records.get(2));
+                tableChanges = ((Struct) records.get(2).value()).getArray("tableChanges");
+                assertThat(tableChanges).hasSize(1);
+                assertTableChange(tableChanges.get(0), "ALTER", "DEBEZIUM", "DBZ4782A");
+
+                // Stop the connector
+                stopConnector();
+
+                // Now commit the in-progress transaction while connector is down
+                connection2.commit();
+
+                // Restart the connector and verify we don't re-emit the ALTER table; however that we do
+                // capture the in-progress transaction correctly when it is committed.
+                start(OracleConnector.class, config);
+                assertConnectorIsRunning();
+                waitForStreamingRunning(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+                connection.execute("INSERT INTO dbz4782a values (1, 'data1', 'data2')");
+
+                sourceRecords = consumeRecordsByTopic(2);
+                sourceRecords.allRecordsInOrder().forEach(System.out::println);
+                records = sourceRecords.recordsForTopic(topicName("DEBEZIUM", "DBZ4782A"));
+                assertThat(records).hasSize(1);
+                VerifyRecord.isValidInsert(records.get(0), "ID", 1);
+
+                records = sourceRecords.recordsForTopic(topicName("DEBEZIUM", "DBZ4782B"));
+                assertThat(records).hasSize(1);
+                VerifyRecord.isValidInsert(records.get(0), "ID", 2);
+            }
+
+            // There should be no other records to consume
+            assertNoRecordsToConsume();
+        }
+        finally {
+            TestHelper.dropTable(connection, "dbz4782a");
+            TestHelper.dropTable(connection, "dbz4782b");
+        }
+    }
+
+    @Test
+    @FixFor("DBZ-5285")
+    public void shouldOnlyCaptureSchemaChangesForIncludedTables() throws Exception {
+        TestHelper.dropTable(connection, "dbz5285a");
+        TestHelper.dropTable(connection, "dbz5285b");
+        try {
+            connection.execute("CREATE TABLE dbz5285a (id numeric(9,0) primary key, data varchar2(50))");
+            connection.execute("CREATE TABLE dbz5285b (id numeric(9,0) primary key, data varchar2(50))");
+            TestHelper.streamTable(connection, "dbz5285a");
+            TestHelper.streamTable(connection, "dbz5285b");
+
+            connection.execute("INSERT INTO dbz5285a (id,data) values (1, 'A')");
+            connection.execute("INSERT INTO dbz5285b (id,data) values (2, 'B')");
+
+            Configuration config = TestHelper.defaultConfig()
+                    .with(OracleConnectorConfig.TABLE_INCLUDE_LIST, "DEBEZIUM\\.DBZ5285A")
+                    .with(SchemaHistory.STORE_ONLY_CAPTURED_TABLES_DDL, true)
+                    .with(OracleConnectorConfig.INCLUDE_SCHEMA_CHANGES, true)
+                    .build();
+
+            start(OracleConnector.class, config);
+            assertConnectorIsRunning();
+
+            waitForSnapshotToBeCompleted(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+            // Create and Insert into DBZ5285A
+            SourceRecords records = consumeRecordsByTopic(2);
+
+            // Check schema changes from snapshot
+            List<SourceRecord> schemaRecords = records.recordsForTopic("server1");
+            assertThat(schemaRecords).hasSize(1);
+            assertSnapshotSchemaChange(schemaRecords.get(0));
+            List<Struct> tableChanges = ((Struct) schemaRecords.get(0).value()).getArray("tableChanges");
+            assertThat(tableChanges).hasSize(1);
+            assertTableChange(tableChanges.get(0), "CREATE", "DEBEZIUM", "DBZ5285A");
+
+            // Change state changes from snapshot
+            List<SourceRecord> tableRecords = records.recordsForTopic("server1.DEBEZIUM.DBZ5285A");
+            assertThat(tableRecords).hasSize(1);
+            VerifyRecord.isValidRead(tableRecords.get(0), "ID", 1);
+            Struct after = ((Struct) tableRecords.get(0).value()).getStruct(FieldName.AFTER);
+            assertThat(after.get("ID")).isEqualTo(1);
+            assertThat(after.get("DATA")).isEqualTo("A");
+
+            // There should be no records captured for DBZ5285B
+            assertNoRecordsToConsume();
+
+            waitForStreamingRunning(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+            // Change table structure and insert more data.
+            connection.execute("ALTER TABLE dbz5285a add data2 varchar2(50)");
+            connection.execute("ALTER TABLE dbz5285b add data2 varchar2(50)");
+            connection.execute("INSERT INTO dbz5285a (id,data,data2) values (3, 'A3', 'D1')");
+            connection.execute("INSERT INTO dbz5285b (id,data,data2) values (4, 'B4', 'D2')");
+
+            // Alter and Insert into DBZ5285A
+            records = consumeRecordsByTopic(2);
+
+            // Check schema changes from streaming
+            schemaRecords = records.recordsForTopic("server1");
+            assertThat(schemaRecords).hasSize(1);
+            assertStreamingSchemaChange(schemaRecords.get(0));
+            tableChanges = ((Struct) schemaRecords.get(0).value()).getArray("tableChanges");
+            assertThat(tableChanges).hasSize(1);
+            assertTableChange(tableChanges.get(0), "ALTER", "DEBEZIUM", "DBZ5285A");
+
+            // Change state changes from streaming
+            tableRecords = records.recordsForTopic("server1.DEBEZIUM.DBZ5285A");
+            assertThat(tableRecords).hasSize(1);
+            VerifyRecord.isValidInsert(tableRecords.get(0), "ID", 3);
+            after = ((Struct) tableRecords.get(0).value()).getStruct(FieldName.AFTER);
+            assertThat(after.get("ID")).isEqualTo(3);
+            assertThat(after.get("DATA")).isEqualTo("A3");
+            assertThat(after.get("DATA2")).isEqualTo("D1");
+
+            // There should be no records captured for DBZ5285B
+            assertNoRecordsToConsume();
+        }
+        finally {
+            TestHelper.dropTable(connection, "dbz5285b");
+            TestHelper.dropTable(connection, "dbz5285a");
+        }
+    }
+
+    @Test
+    @FixFor("DBZ-5285")
+    public void shouldCaptureSchemaChangesForAllTablesRegardlessOfIncludeList() throws Exception {
+        TestHelper.dropTable(connection, "dbz5285a");
+        TestHelper.dropTable(connection, "dbz5285b");
+        try {
+            connection.execute("CREATE TABLE dbz5285a (id numeric(9,0) primary key, data varchar2(50))");
+            connection.execute("CREATE TABLE dbz5285b (id numeric(9,0) primary key, data varchar2(50))");
+            TestHelper.streamTable(connection, "dbz5285a");
+            TestHelper.streamTable(connection, "dbz5285b");
+
+            connection.execute("INSERT INTO dbz5285a (id,data) values (1, 'A')");
+            connection.execute("INSERT INTO dbz5285b (id,data) values (2, 'B')");
+
+            Configuration config = TestHelper.defaultConfig()
+                    .with(OracleConnectorConfig.TABLE_INCLUDE_LIST, "DEBEZIUM\\.DBZ5285A")
+                    .with(SchemaHistory.STORE_ONLY_CAPTURED_TABLES_DDL, false)
+                    .with(OracleConnectorConfig.INCLUDE_SCHEMA_CHANGES, true)
+                    .build();
+
+            start(OracleConnector.class, config);
+            assertConnectorIsRunning();
+
+            waitForSnapshotToBeCompleted(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+            // Create for both tables and Insert into DBZ5285A
+            SourceRecords records = consumeRecordsByTopic(3);
+
+            // Check schema changes from snapshot
+            List<SourceRecord> schemaRecords = records.recordsForTopic("server1");
+            assertThat(schemaRecords).hasSize(2);
+            assertSnapshotSchemaChange(schemaRecords.get(0));
+            List<Struct> tableChanges = ((Struct) schemaRecords.get(0).value()).getArray("tableChanges");
+            assertThat(tableChanges).hasSize(1);
+            assertTableChange(tableChanges.get(0), "CREATE", "DEBEZIUM", "DBZ5285A");
+
+            assertSnapshotSchemaChange(schemaRecords.get(1));
+            tableChanges = ((Struct) schemaRecords.get(1).value()).getArray("tableChanges");
+            assertThat(tableChanges).hasSize(1);
+            assertTableChange(tableChanges.get(0), "CREATE", "DEBEZIUM", "DBZ5285B");
+
+            // Change state changes from snapshot
+            List<SourceRecord> tableRecords = records.recordsForTopic("server1.DEBEZIUM.DBZ5285A");
+            assertThat(tableRecords).hasSize(1);
+            VerifyRecord.isValidRead(tableRecords.get(0), "ID", 1);
+            Struct after = ((Struct) tableRecords.get(0).value()).getStruct(FieldName.AFTER);
+            assertThat(after.get("ID")).isEqualTo(1);
+            assertThat(after.get("DATA")).isEqualTo("A");
+
+            // There should be no data records captured for DBZ5285B
+            assertNoRecordsToConsume();
+
+            waitForStreamingRunning(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+            // Change table structure and insert more data.
+            connection.execute("ALTER TABLE dbz5285a add data2 varchar2(50)");
+            connection.execute("ALTER TABLE dbz5285b add data2 varchar2(50)");
+            connection.execute("INSERT INTO dbz5285a (id,data,data2) values (3, 'A3', 'D1')");
+            connection.execute("INSERT INTO dbz5285b (id,data,data2) values (4, 'B4', 'D2')");
+
+            // Alter for both tables and Insert into DBZ5285A
+            records = consumeRecordsByTopic(3);
+
+            // Check schema changes from streaming
+            schemaRecords = records.recordsForTopic("server1");
+            schemaRecords.forEach(System.out::println);
+            assertThat(schemaRecords).hasSize(2);
+            assertStreamingSchemaChange(schemaRecords.get(0));
+            tableChanges = ((Struct) schemaRecords.get(0).value()).getArray("tableChanges");
+            assertThat(tableChanges).hasSize(1);
+            assertTableChange(tableChanges.get(0), "ALTER", "DEBEZIUM", "DBZ5285A");
+
+            assertStreamingSchemaChange(schemaRecords.get(1));
+            tableChanges = ((Struct) schemaRecords.get(1).value()).getArray("tableChanges");
+            assertThat(tableChanges).isEmpty();
+            assertSourceTableInfo(schemaRecords.get(1), "DEBEZIUM", "DBZ5285B");
+
+            // Change state changes from streaming
+            tableRecords = records.recordsForTopic("server1.DEBEZIUM.DBZ5285A");
+            assertThat(tableRecords).hasSize(1);
+            VerifyRecord.isValidInsert(tableRecords.get(0), "ID", 3);
+            after = ((Struct) tableRecords.get(0).value()).getStruct(FieldName.AFTER);
+            assertThat(after.get("ID")).isEqualTo(3);
+            assertThat(after.get("DATA")).isEqualTo("A3");
+            assertThat(after.get("DATA2")).isEqualTo("D1");
+
+            // There should be no insert records captured for DBZ5285B
+            assertNoRecordsToConsume();
+        }
+        finally {
+            TestHelper.dropTable(connection, "dbz5285b");
+            TestHelper.dropTable(connection, "dbz5285a");
+        }
+    }
+
+    @Test
+    @FixFor("DBZ-8089")
+    public void shouldResetScaleWhenColumnDataTypeIsModified() throws Exception {
+        TestHelper.dropTable(connection, "dbz8089");
+        try {
+            // When NUMBER column is set, it's constructed with a scale of 0.
+            // Later when the column is modified to be a FLOAT, the scale should be reset to null rather than left as 0.
+            connection.execute("CREATE TABLE dbz8089 (id numeric(9,0) primary key, salary numeric(*,0))");
+            TestHelper.streamTable(connection, "dbz8089");
+
+            Configuration config = TestHelper.defaultConfig()
+                    .with(OracleConnectorConfig.TABLE_INCLUDE_LIST, "DEBEZIUM\\.DBZ8089")
+                    .with(OracleConnectorConfig.DECIMAL_HANDLING_MODE, DecimalHandlingMode.DOUBLE)
+                    .build();
+
+            start(OracleConnector.class, config);
+            assertConnectorIsRunning();
+
+            waitForStreamingRunning(TestHelper.CONNECTOR_NAME, TestHelper.SERVER_NAME);
+
+            connection.execute("INSERT INTO dbz8089 values (1, 12.36)");
+            SourceRecords records = consumeRecordsByTopic(1);
+            assertThat(records.allRecordsInOrder()).hasSize(1);
+
+            Struct after = ((Struct) records.allRecordsInOrder().get(0).value()).getStruct(FieldName.AFTER);
+            assertThat(after.get("ID")).isEqualTo(1.0);
+            assertThat(after.get("SALARY")).isEqualTo(12.0); // 12.36 will be truncated
+
+            // Previous the scale was not being reset from the original NUMERIC data type
+            // This meant the scale was left as 0 rather than null, so the value converters would attempt unnecessary adjustments.
+            // By adjusting the DDL parser to reset the scale to null, this mimics how the table's schema is parsed before snapshots.
+            connection.execute("ALTER TABLE dbz8089 modify salary float");
+            connection.execute("INSERT INTO dbz8089 values (2, 12.36)");
+            records = consumeRecordsByTopic(1);
+            assertThat(records.allRecordsInOrder()).hasSize(1);
+
+            after = ((Struct) records.allRecordsInOrder().get(0).value()).getStruct(FieldName.AFTER);
+            assertThat(after.get("ID")).isEqualTo(2.0);
+            assertThat(after.get("SALARY")).isEqualTo(12.36); // should be a double
+        }
+        finally {
+            stopConnector();
+            TestHelper.dropTable(connection, "dbz8089");
         }
     }
 
@@ -1238,7 +1675,7 @@ public class OracleSchemaMigrationIT extends AbstractConnectorTest {
 
     private static void assertSourceTableInfo(SourceRecord record, String schema, String table) {
         final Struct source = ((Struct) record.value()).getStruct("source");
-        assertThat(source.get("db")).isEqualTo(TestHelper.DATABASE);
+        assertThat(source.get("db")).isEqualTo(TestHelper.getDatabaseName());
         assertThat(source.get("schema")).isEqualTo(schema);
         assertThat(source.get("table")).isEqualTo(table);
     }

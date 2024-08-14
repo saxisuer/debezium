@@ -46,7 +46,7 @@ The following topics provide details:
 * xref:outbox-table-structure-expected-by-debezium-outbox-event-router-smt[]
 * xref:basic-debezium-outbox-event-router-smt-configuration[]
 * xref:options-for-applying-the-outbox-event-router-transformation-selectively[]
-* xref:using-avro-as-the-payload-format-in-debezium-outbox-messages[]
+* xref:outbox-event-router-using-avro-as-the-payload-format-in-debezium-outbox-messages[]
 * xref:emitting-additional-fields-in-debezium-outbox-messages[]
 * xref:expanding-escaped-json-string-as-json[]
 * xref:options-for-configuring-outbox-event-router-transformation[]
@@ -103,7 +103,9 @@ A {prodname} connector that is configured to apply the outbox event router SMT g
     "xmin": null
   },
   "op": "c",
-  "ts_ms": 1556890294484
+  "ts_ms": 1556890294484,
+  "ts_us": 1556890294484651,
+  "ts_ns": 1556890294484651402
 }
 ----
 
@@ -179,13 +181,18 @@ One example could be a column `eventType` which conveys a user-defined value tha
 [[basic-outbox-configuration]]
 == Basic configuration
 
-To configure a {prodname} connector to support the outbox pattern, configure the `outbox.EventRouter` SMT. For example, the basic configuration in a `.properties` file looks like this:
+To configure a {prodname} connector to support the outbox pattern, configure the `outbox.EventRouter` SMT.
+To obtain the default behavior of the SMT, add it to the connector configuration without specifying any options, as in the following example:
 
 [source]
 ----
 transforms=outbox,...
 transforms.outbox.type=io.debezium.transforms.outbox.EventRouter
 ----
+
+.Customizing the configuration
+The connector might emit many types of event messages (for example, heartbeat messages, tombstone messages, or metadata messages about transactions or schema changes).
+To apply the transformation only to events that originate in the outbox table, define xref:options-for-applying-the-transformation-selectively[an SMT predicate statement that selectively applies the transformation] to those events only.
 
 // Type: concept
 // Title: Options for applying the Outbox event router transformation selectively
@@ -197,83 +204,36 @@ In addition to the change event messages that a {prodname} connector emits when 
 Because the structure of these other messages differs from the structure of the change event messages that the SMT is designed to process, it's best to configure the connector to selectively apply the SMT, so that it processes only the intended data change messages.
 You can use one of the following methods to configure the connector to apply the SMT selectively:
 
-* xref:{link-smt-predicates}#applying-transformation-selectively[Configure an SMT predicate for the transformation].
+* {link-prefix}:{link-smt-predicates}#applying-transformations-selectively[Configure an SMT predicate for the transformation].
 * Use the xref:outbox-event-router-property-route-topic-regex[`route.topic.regex`] configuration option for the SMT.
 
 // Type: concept
-// Title: Using Avro as the payload format in {prodname} outbox messages
-// ModuleID: using-avro-as-the-payload-format-in-debezium-outbox-messages
-[[avro-as-payload-format]]
-== Using Avro as the payload format
+// Title: Payload serialization format
+// ModuleID: outbox-event-router-payload-serialization-format
+== Payload serialization format
 
-The outbox event router SMT supports arbitrary payload formats. The `payload` column value in an outbox table is passed on transparently. An alternative to working with JSON is to use Avro.
-This can be beneficial for message format governance and for ensuring that outbox event schemas evolve in a backwards-compatible way.
-
-How a source application produces Avro formatted content for outbox message payloads is out of the scope of this documentation.
-One possibility is to leverage the `KafkaAvroSerializer` class to serialize `GenericRecord` instances.
-To ensure that the Kafka message value is the exact Avro binary data,
-apply the following configuration to the connector:
-
-[source]
-----
-transforms=outbox,...
-transforms.outbox.type=io.debezium.transforms.outbox.EventRouter
-value.converter=io.debezium.converters.ByteBufferConverter
-----
-
-By default, the `payload` column value (the Avro data) is the only message value.
-Configuration of `ByteBufferConverter` as the value converter propagates the `payload` column value as-is into the Kafka message value.
-
-The {prodname} connectors may be configured to emit heartbeat, transaction metadata, or schema change events (support varies by connector).
-These events cannot be serialized by the `ByteBufferConverter` so additional configuration must be provided so the converter knows how to serialize these events.
-As an example, the following configuration illustrates using the Apache Kafka `JsonConverter` with no schemas:
-
-[source]
-----
-transforms=outbox,...
-transforms.outbox.type=io.debezium.transforms.outbox.EventRouter
-value.converter=io.debezium.converters.ByteBufferConverter
-value.converter.delegate.converter.type=org.apache.kafka.connect.json.JsonConverter
-value.converter.delegate.converter.type.schemas.enable=false
-----
-
-The delegate `Converter` implementation is specified by the `delegate.converter.type` option.
-If any extra configuration options are needed by the converter, they can also be specified, such as the disablement of schemas shown above using `schemas.enable=false`.
+The outbox event router SMT supports arbitrary payload formats.
+The SMT passes on `payload` column values that it reads from the outbox table without modification.
+The way that the SMT converts these column values into Kafka message fields depends on how you configure the SMT.
+Common payload formats for serializing data are JSON and Avro.
 
 
 // Type: concept
-// Title: Emitting additional fields in {prodname} outbox messages
-// ModuleID: emitting-additional-fields-in-debezium-outbox-messages
-[[emitting-messages-with-additional-fields]]
-== Emitting messages with additional fields
+// Title: Using JSON as the serialization format
+// ModuleID: outbox-event-router-using-json-payload-format
+[[using-json-payload-format]]
+=== Using JSON as the payload format
 
-Your outbox table might contain columns whose values you want to add to the emitted outbox messages. For example, consider an outbox table that has a value of `purchase-order` in the `aggregatetype` column and another column, `eventType`, whose possible values are `order-created` and `order-shipped`.
-To emit the `eventType` column value in the outbox message header, configure the SMT like this:
-
-[source]
-----
-transforms=outbox,...
-transforms.outbox.type=io.debezium.transforms.outbox.EventRouter
-transforms.outbox.table.fields.additional.placement=type:header:eventType
-----
-
-To emit the `eventType` column value in the outbox message envelope, configure the SMT like this:
-
-[source]
-----
-transforms=outbox,...
-transforms.outbox.type=io.debezium.transforms.outbox.EventRouter
-transforms.outbox.table.fields.additional.placement=type:envelope:eventType
-----
+The default serialization format for the outbox event router SMT is JSON.
+To use this format, the data type of the source column must be JSON (for example, `jsonb` in PostgreSQL).
 
 // Type: concept
-// Title: Expanding escaped JSON String as JSON
-// ModuleID: expanding-escaped-json-string-as-json
+// Title: Producing Expanding escaped JSON String as JSON
+// ModuleID: outbox-event-router-expanding-escaped-json-string-as-json
 [[expanding-escaped-json-string-as-json]]
-== Expanding escaped JSON String as JSON
+==== Expanding escaped JSON String as JSON
 
-You may have noticed that the Debezium outbox message contains the `payload` represented as a String.
-So when this string, is actually JSON, it appears as escaped in the result Kafka message like shown below:
+When a {prodname} outbox message represents the `payload` as a JSON String, the resulting Kafka message escapes the string as in the following example:
 
 [source,javascript,indent=0]
 ----
@@ -286,8 +246,8 @@ So when this string, is actually JSON, it appears as escaped in the result Kafka
 }
 ----
 
-The outbox event router allows you to expand this message content to "real" JSON with the companion schema
-being deduced from the JSON document itself. That way the result in Kafka message looks like:
+The outbox event router enables you to expand the message content to "real" JSON, deducing the companion schema from the JSON document.
+The resulting Kafka message is formatted as in the following example:
 
 [source,javascript,indent=0]
 ----
@@ -300,15 +260,132 @@ being deduced from the JSON document itself. That way the result in Kafka messag
 }
 ----
 
-To enable this transformation, you have to set the xref:outbox-event-router-property-table-expand-json-payload[`table.expand.json.payload`] to true and use the `StringConverter` like below:
+To enable use of the outbox event router transformation, set the xref:outbox-event-router-property-table-expand-json-payload[`table.expand.json.payload`] to true, and use the `JsonConverter` as shown in the following example:
 
 [source]
 ----
 transforms=outbox,...
 transforms.outbox.type=io.debezium.transforms.outbox.EventRouter
 transforms.outbox.table.expand.json.payload=true
-value.converter=org.apache.kafka.connect.storage.StringConverter
+value.converter=org.apache.kafka.connect.json.JsonConverter
 ----
+
+// Type: concept
+// Title: Using Apache Avro as the payload format in {prodname} outbox messages
+// ModuleID: outbox-event-router-using-avro-as-the-payload-format-in-debezium-outbox-messages
+[[avro-as-payload-format]]
+=== Using Apache Avro as the payload format
+
+Apache Avro is a common framework for serializing data.
+Using Avro can be beneficial for message format governance and for ensuring that outbox event schemas evolve in a backwards-compatible way.
+
+How a source application produces Avro formatted content for outbox message payloads is out of the scope of this documentation.
+One possibility is to leverage the `KafkaAvroSerializer` class to serialize `GenericRecord` instances.
+To ensure that the Kafka message value is the exact Avro binary data,
+apply the following configuration to the connector:
+
+[source]
+----
+transforms=outbox,...
+transforms.outbox.type=io.debezium.transforms.outbox.EventRouter
+value.converter=io.debezium.converters.BinaryDataConverter
+----
+
+By default, the `payload` column value (the Avro data) is the only message value.
+When data is stored in Avro format, the column format must be set to a binary data type, such as `bytea` in PostgreSQL.
+The value converter for the SMT must also be set to `BinaryDataConverter`, so that it propagates the binary value of the `payload` column as-is into the Kafka message value.
+
+The {prodname} connectors may be configured to emit heartbeat, transaction metadata, or schema change events (support varies by connector).
+These events cannot be serialized by the `BinaryDataConverter` so additional configuration must be provided so the converter knows how to serialize these events.
+As an example, the following configuration illustrates using the Apache Kafka `JsonConverter` with no schemas:
+
+[source]
+----
+transforms=outbox,...
+transforms.outbox.type=io.debezium.transforms.outbox.EventRouter
+value.converter=io.debezium.converters.BinaryDataConverter
+value.converter.delegate.converter.type=org.apache.kafka.connect.json.JsonConverter
+value.converter.delegate.converter.type.schemas.enable=false
+----
+
+The delegate `Converter` implementation is specified by the `delegate.converter.type` option.
+If any extra configuration options are needed by the converter, they can also be specified, such as the disablement of schemas shown above using `schemas.enable=false`.
+
+The following example illustrates how to configure the SMT to use a delegate converter with a Apicurio Registry to convert data into Avro format:
+
+[source]
+----
+transforms=outbox,...
+transforms.outbox.type=io.debezium.transforms.outbox.EventRouter
+value.converter=io.debezium.converters.BinaryDataConverter
+value.converter.delegate.converter.type=io.apicurio.registry.utils.converter.AvroConverter
+value.converter.delegate.converter.apicurio.registry.url=http://apicurio:8080/apis/registry/v2
+value.converter.delegate.converter.apicurio.registry.auto-register=true
+value.converter.delegate.converter.registry.find-latest=true
+----
+
+Finally, the following example illustrates how to configure the SMT to use a delegate converter with a Confluent Schema Registry to convert data into Avro format:
+
+[source]
+----
+transforms=outbox,...
+transforms.outbox.type=io.debezium.transforms.outbox.EventRouter
+value.converter=io.debezium.converters.BinaryDataConverter
+value.converter.delegate.converter.type=io.confluent.connect.avro.AvroConverter
+value.converter.delegate.converter.type.basic.auth.credentials.source=USER_INFO
+value.converter.delegate.converter.type.basic.auth.user.info={CREDENTIALS}
+value.converter.delegate.converter.type.schema.registry.url={URL}
+----
+
+[NOTE]
+====
+In the preceding configuration examples, because the `AvroConverter` is configured as a delegate converter, third-party libraries are required.
+Information about how to add third-party libraries to the classpath is beyond the scope of this document.
+====
+
+// Type: concept
+// Title: Emitting additional fields in {prodname} outbox messages
+// ModuleID: emitting-additional-fields-in-debezium-outbox-messages
+[[emitting-messages-with-additional-fields]]
+== Emitting messages with additional fields
+
+Your outbox table might contain columns whose values you want to add to the emitted outbox messages. For example, consider an outbox table that has a value of `purchase-order` in the `aggregatetype` column and another column, `eventType`, whose possible values are `order-created` and `order-shipped`. Additional fields can be added with the syntax `column:placement:alias`.
+
+The allowed values for `placement` are:
+- `header`
+- `envelope`
+- `partition`
+
+To emit the `eventType` column value in the outbox message header, configure the SMT like this:
+
+[source]
+----
+transforms=outbox,...
+transforms.outbox.type=io.debezium.transforms.outbox.EventRouter
+transforms.outbox.table.fields.additional.placement=eventType:header:type
+----
+
+The result will be a header on the Kafka message with `type` as its key, and the value of the `eventType` column as its value.
+
+To emit the `eventType` column value in the outbox message envelope, configure the SMT like this:
+
+[source]
+----
+transforms=outbox,...
+transforms.outbox.type=io.debezium.transforms.outbox.EventRouter
+transforms.outbox.table.fields.additional.placement=eventType:envelope:type
+----
+
+To control which partition the outbox message is produced on, configure the SMT like this:
+
+[source]
+----
+transforms=outbox,...
+transforms.outbox.type=io.debezium.transforms.outbox.EventRouter
+transforms.outbox.table.fields.additional.placement=partitionColumn:partition
+----
+
+Note that for the `partition` placement, adding an alias will have no effect.
 
 // Type: reference
 // ModuleID: options-for-configuring-outbox-event-router-transformation
@@ -359,20 +436,20 @@ This ID will be stored in the emitted event's headers under the `id` key.
 |Table
 |Specifies the outbox table column that contains the event payload.
 
-|[[outbox-event-router-property-table-field-event-payload-id]]<<outbox-event-router-property-table-field-event-payload-id, `table.field.event.payload.id`>>
-|`aggregateid`
-|Table
-|Specifies the outbox table column that contains the payload ID.
-This ID will be used as the emitted event's key. +
- +
-This option is deprecated, use xref:outbox-event-router-property-table-field-event-key[table.field.event.key] instead.
-
 |[[outbox-event-router-property-table-expand-json-payload]]<<outbox-event-router-property-table-expand-json-payload, `table.expand.json.payload`>>
 |`false`
 |Table
 a|Specifies whether the JSON expansion of a String payload should be done. If no content found or in case of parsing error, the content is kept "as is". +
  +
 Fore more details, please see the xref:expanding-escaped-json-string-as-json[expanding escaped json] section.
+
+|[[outbox-event-router-property-table-json-payload-null-behavior]]<<outbox-event-router-property-table-json-payload-null-behavior, `table.json.payload.null.behavior`>>
+|`ignore`
+|Table
+a|When enable JSON expansion property `table.expand.json.payload`, determines the behavior of json payload that including an `null` value on the outbox table. Possible settings are:
+
+* `ignore` - Ignore the null value.
+* `optional_bytes` - Keep the null value, and treat null as optional bytes of connect.
 
 |[[outbox-event-router-property-table-fields-additional-placement]]<<outbox-event-router-property-table-fields-additional-placement, `table.fields.additional.placement`>>
 |
@@ -388,6 +465,11 @@ To specify an alias for the column, specify a trio with the alias as the third v
 The second value is the placement and it must always be `header` or `envelope`.
 
 Configuration examples are in xref:emitting-messages-with-additional-fields[emitting additional fields in {prodname} outbox messages].
+
+|[[outbox-event-router-property-table-fields-additional-error-on-missing]]<<outbox-event-router-property-table-fields-additional-error-on-missing, `table.fields.additional.error.on.missing`>>
+|`true`
+|Table, Envelope
+a|Specifies whether this transformation throws an error if a field specified by the `table.fields.additional.placement` property is not found in the Outbox payload.
 
 |[[outbox-event-router-property-table-field-event-schema-version]]<<outbox-event-router-property-table-field-event-schema-version, `table.field.event.schema.version`>>
 |
@@ -421,23 +503,6 @@ To change the topic name, you can: +
 |`false`
 |Router
 |Indicates whether an empty or `null` payload causes the connector to emit a tombstone event.
-
-ifdef::community[]
-|[[outbox-event-router-property-debezium-op-invalid-behavior]]<<outbox-event-router-property-debezium-op-invalid-behavior, `debezium.op.invalid.behavior`>> +
-_Deprecated_
-|`warn`
-|{prodname}
-a|Determines the behavior of the SMT when there is an `UPDATE` operation on the outbox table. Possible settings are:
-
-* `warn` - The SMT logs a warning and continues to the next outbox table record.
-* `error` - The SMT logs an error and continues to the next outbox table record.
-* `fatal` - The SMT logs an error and the connector stops processing.
-
-All changes in an outbox table are expected to be `INSERT` operations. That is, an outbox table functions as a queue; updates to records in an outbox table are not allowed.
-The SMT automatically filters out `DELETE` operations on an outbox table.
-
-_Use xref:outbox-event-router-property-table-op-invalid-behavior[`table.op.invalid.behavior`] instead_.
-endif::community[]
 
 ifdef::community[]
 |[[outbox-event-router-property-tracing-span-context-field]]<<outbox-event-router-property-tracing-span-context-field, `tracing.span.context.field`>>

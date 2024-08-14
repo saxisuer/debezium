@@ -68,6 +68,11 @@ public class ColumnDefinitionParserListener extends BaseParserListener {
 
     @Override
     public void enterModify_col_properties(PlSqlParser.Modify_col_propertiesContext ctx) {
+        // Scale should always get unset
+        // It should be parsed by the data type resolver, if its applicable
+        // This standardizes the handling of scale when data types shift from one to another
+        columnEditor.unsetScale();
+
         resolveColumnDataType(ctx);
         if (ctx.DEFAULT() != null) {
             columnEditor.defaultValueExpression(ctx.column_default_value().getText());
@@ -83,7 +88,7 @@ public class ColumnDefinitionParserListener extends BaseParserListener {
         columnEditor.optional(!hasNotNullConstraint);
 
         if (ctx.datatype() == null) {
-            if (ctx.type_name() != null && "\"MDSYS\".\"SDO_GEOMETRY\"".equalsIgnoreCase(ctx.type_name().getText())) {
+            if (ctx.type_name() != null && "MDSYS.SDO_GEOMETRY".equalsIgnoreCase(ctx.type_name().getText().replace("\"", ""))) {
                 columnEditor.jdbcType(Types.STRUCT).type("MDSYS.SDO_GEOMETRY");
             }
         }
@@ -194,7 +199,8 @@ public class ColumnDefinitionParserListener extends BaseParserListener {
                     setPrecision(precisionPart, columnEditor);
                 }
             }
-            else if (ctx.native_datatype_element().CHAR() != null) {
+            else if (ctx.native_datatype_element().CHAR() != null ||
+                    ctx.native_datatype_element().CHARACTER() != null) {
                 columnEditor
                         .jdbcType(Types.CHAR)
                         .type("CHAR")
@@ -297,6 +303,11 @@ public class ColumnDefinitionParserListener extends BaseParserListener {
                 columnEditor
                         .jdbcType(Types.VARCHAR)
                         .type("ROWID");
+            }
+            else if (ctx.native_datatype_element().XMLTYPE() != null) {
+                columnEditor
+                        .jdbcType(OracleTypes.SQLXML)
+                        .type("XMLTYPE");
             }
             else {
                 columnEditor

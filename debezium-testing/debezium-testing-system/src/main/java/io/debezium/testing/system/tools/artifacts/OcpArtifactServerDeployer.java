@@ -73,15 +73,16 @@ public class OcpArtifactServerDeployer extends AbstractOcpDeployer<OcpArtifactSe
     }
 
     @Override
-    public OcpArtifactServerController deploy() throws InterruptedException {
+    public OcpArtifactServerController deploy() throws Exception {
         LOGGER.info("Deploying debezium artifact server");
+        LOGGER.debug("Artifact server spec: \n" + deployment.getSpec().toString());
         deployment = ocp.apps().deployments().inNamespace(project).createOrReplace(deployment);
-
-        ocpUtils.waitForPods(project, deployment.getMetadata().getLabels());
 
         service.getMetadata().setLabels(deployment.getMetadata().getLabels());
         service = ocp.services().inNamespace(project).createOrReplace(service);
 
-        return new OcpArtifactServerController(deployment, service, ocp, http);
+        OcpArtifactServerController controller = new OcpArtifactServerController(deployment, service, ocp, http);
+        controller.waitForServer();
+        return controller;
     }
 }

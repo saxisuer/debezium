@@ -5,9 +5,10 @@
  */
 package io.debezium.connector.oracle;
 
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.sql.Clob;
 import java.sql.NClob;
 import java.sql.SQLException;
@@ -31,6 +32,10 @@ import org.junit.rules.TestRule;
 import io.debezium.config.Configuration;
 import io.debezium.config.Configuration.Builder;
 import io.debezium.connector.oracle.junit.SkipTestDependingOnAdapterNameRule;
+import io.debezium.connector.oracle.junit.SkipTestDependingOnStrategyRule;
+import io.debezium.connector.oracle.junit.SkipTestWhenRunWithApicurioRule;
+import io.debezium.connector.oracle.junit.SkipWhenLogMiningStrategyIs;
+import io.debezium.connector.oracle.junit.SkipWhenRunWithApicurio;
 import io.debezium.connector.oracle.util.TestHelper;
 import io.debezium.data.SchemaAndValueField;
 import io.debezium.data.VariableScaleDecimal;
@@ -82,6 +87,7 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
             "  val_decimal decimal(10, 6), " +
             "  val_numeric numeric(10, 6), " +
             "  val_num_vs number, " +
+            "  val_num_vs2 number(38,0), " +
             "  primary key (id)" +
             ")";
 
@@ -100,6 +106,7 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
             "  val_number_4_negative_scale number(2, -2), " +
             "  val_number_9_negative_scale number(8, -1), " +
             "  val_number_18_negative_scale number(16, -2), " +
+            "  val_number_36_negative_scale number(36, -2), " +
             "  val_decimal decimal(10), " +
             "  val_numeric numeric(10), " +
             "  val_number_1 number(1), " +
@@ -159,7 +166,8 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
             new SchemaAndValueField("VAL_DECIMAL", Decimal.builder(6).parameter(PRECISION_PARAMETER_KEY, "10").optional().build(), new BigDecimal("1234.567891")),
             new SchemaAndValueField("VAL_NUMERIC", Decimal.builder(6).parameter(PRECISION_PARAMETER_KEY, "10").optional().build(), new BigDecimal("1234.567891")),
             new SchemaAndValueField("VAL_NUM_VS", VariableScaleDecimal.builder().optional().build(),
-                    VariableScaleDecimal.fromLogical(VariableScaleDecimal.builder().optional().build(), new BigDecimal("77.323"))));
+                    VariableScaleDecimal.fromLogical(VariableScaleDecimal.builder().optional().build(), new BigDecimal("77.323"))),
+            new SchemaAndValueField("VAL_NUM_VS2", Decimal.builder(0).parameter(PRECISION_PARAMETER_KEY, "38").optional().build(), new BigDecimal("77")));
 
     private static final List<SchemaAndValueField> EXPECTED_FP_AS_STRING = Arrays.asList(
             new SchemaAndValueField("VAL_BF", Schema.OPTIONAL_FLOAT32_SCHEMA, 1.1f),
@@ -171,7 +179,8 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
             new SchemaAndValueField("VAL_R", Schema.OPTIONAL_STRING_SCHEMA, "6.66"),
             new SchemaAndValueField("VAL_DECIMAL", Schema.OPTIONAL_STRING_SCHEMA, "1234.567891"),
             new SchemaAndValueField("VAL_NUMERIC", Schema.OPTIONAL_STRING_SCHEMA, "1234.567891"),
-            new SchemaAndValueField("VAL_NUM_VS", Schema.OPTIONAL_STRING_SCHEMA, "77.323"));
+            new SchemaAndValueField("VAL_NUM_VS", Schema.OPTIONAL_STRING_SCHEMA, "77.323"),
+            new SchemaAndValueField("VAL_NUM_VS2", Schema.OPTIONAL_STRING_SCHEMA, "77"));
 
     private static final List<SchemaAndValueField> EXPECTED_FP_AS_DOUBLE = Arrays.asList(
             new SchemaAndValueField("VAL_BF", Schema.OPTIONAL_FLOAT32_SCHEMA, 1.1f),
@@ -183,7 +192,8 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
             new SchemaAndValueField("VAL_R", Schema.OPTIONAL_FLOAT64_SCHEMA, 6.66),
             new SchemaAndValueField("VAL_DECIMAL", Schema.OPTIONAL_FLOAT64_SCHEMA, 1234.567891),
             new SchemaAndValueField("VAL_NUMERIC", Schema.OPTIONAL_FLOAT64_SCHEMA, 1234.567891),
-            new SchemaAndValueField("VAL_NUM_VS", Schema.OPTIONAL_FLOAT64_SCHEMA, 77.323));
+            new SchemaAndValueField("VAL_NUM_VS", Schema.OPTIONAL_FLOAT64_SCHEMA, 77.323),
+            new SchemaAndValueField("VAL_NUM_VS2", Schema.OPTIONAL_FLOAT64_SCHEMA, 77.0));
 
     private static final List<SchemaAndValueField> EXPECTED_INT = Arrays.asList(
             new SchemaAndValueField("VAL_INT", NUMBER_SCHEMA, new BigDecimal("1")),
@@ -199,6 +209,10 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
             new SchemaAndValueField("VAL_NUMBER_4_NEGATIVE_SCALE", Schema.OPTIONAL_INT16_SCHEMA, (short) 9900),
             new SchemaAndValueField("VAL_NUMBER_9_NEGATIVE_SCALE", Schema.OPTIONAL_INT32_SCHEMA, 9999_99990),
             new SchemaAndValueField("VAL_NUMBER_18_NEGATIVE_SCALE", Schema.OPTIONAL_INT64_SCHEMA, 999_99999_99999_99900L),
+            new SchemaAndValueField("VAL_NUMBER_36_NEGATIVE_SCALE", Decimal.builder(-2).optional()
+                    .parameter(PRECISION_PARAMETER_KEY, "36").build(),
+                    new BigDecimal(
+                            new BigInteger("999999999999999999999999999999999999"), -2)),
             new SchemaAndValueField("VAL_DECIMAL", Schema.OPTIONAL_INT64_SCHEMA, 99999_99999L),
             new SchemaAndValueField("VAL_NUMERIC", Schema.OPTIONAL_INT64_SCHEMA, 99999_99999L),
             new SchemaAndValueField("VAL_NUMBER_1", Schema.OPTIONAL_INT8_SCHEMA, (byte) 1));
@@ -213,10 +227,10 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
                     LocalDateTime.of(2018, 3, 27, 12, 34, 56).toEpochSecond(ZoneOffset.UTC) * 1_000_000 + 125500),
             new SchemaAndValueField("VAL_TS_PRECISION9", NanoTimestamp.builder().optional().build(),
                     LocalDateTime.of(2018, 3, 27, 12, 34, 56).toEpochSecond(ZoneOffset.UTC) * 1_000_000_000 + 125456789),
-            new SchemaAndValueField("VAL_TSTZ", ZonedTimestamp.builder().optional().build(), "2018-03-27T01:34:56.00789-11:00"),
+            new SchemaAndValueField("VAL_TSTZ", ZonedTimestamp.builder().optional().build(), "2018-03-27T01:34:56.007890-11:00"),
             new SchemaAndValueField("VAL_TSLTZ", ZonedTimestamp.builder().optional().build(),
                     LocalDateTime.of(2018, 3, 27, 1, 34, 56, 7890 * 1_000).atZone(ZoneOffset.systemDefault())
-                            .withZoneSameInstant(ZoneOffset.UTC).format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSSS'Z'"))),
+                            .withZoneSameInstant(ZoneOffset.UTC).format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'"))),
             new SchemaAndValueField("VAL_INT_YTM", MicroDuration.builder().optional().build(), -110451600_000_000L),
             new SchemaAndValueField("VAL_INT_DTS", MicroDuration.builder().optional().build(), -93784_560_000L));
 
@@ -231,10 +245,10 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
                     java.util.Date.from(LocalDateTime.of(2018, 3, 27, 12, 34, 56, 125500 * 1_000).atOffset(ZoneOffset.UTC).toInstant())),
             new SchemaAndValueField("VAL_TS_PRECISION9", org.apache.kafka.connect.data.Timestamp.builder().optional().build(),
                     java.util.Date.from(LocalDateTime.of(2018, 3, 27, 12, 34, 56, 125456789).atOffset(ZoneOffset.UTC).toInstant())),
-            new SchemaAndValueField("VAL_TSTZ", ZonedTimestamp.builder().optional().build(), "2018-03-27T01:34:56.00789-11:00"),
+            new SchemaAndValueField("VAL_TSTZ", ZonedTimestamp.builder().optional().build(), "2018-03-27T01:34:56.007890-11:00"),
             new SchemaAndValueField("VAL_TSLTZ", ZonedTimestamp.builder().optional().build(),
                     LocalDateTime.of(2018, 3, 27, 1, 34, 56, 7890 * 1_000).atZone(ZoneOffset.systemDefault())
-                            .withZoneSameInstant(ZoneOffset.UTC).format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSSS'Z'"))),
+                            .withZoneSameInstant(ZoneOffset.UTC).format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'"))),
             new SchemaAndValueField("VAL_INT_YTM", MicroDuration.builder().optional().build(), -110451600_000_000L),
             new SchemaAndValueField("VAL_INT_DTS", MicroDuration.builder().optional().build(), -93784_560_000L));
 
@@ -279,6 +293,12 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
 
     @Rule
     public final TestRule skipAdapterRule = new SkipTestDependingOnAdapterNameRule();
+
+    @Rule
+    public final TestRule skipApicurioRule = new SkipTestWhenRunWithApicurioRule();
+
+    @Rule
+    public final TestRule skipStrategyRule = new SkipTestDependingOnStrategyRule();
 
     private static OracleConnection connection;
 
@@ -416,10 +436,10 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
 
         // insert
         if (insertRecordsDuringTest()) {
-            VerifyRecord.isValidInsert(record, "ID", 1);
+            VerifyRecord.isValidInsert(record, true);
         }
         else {
-            VerifyRecord.isValidRead(record, "ID", 1);
+            VerifyRecord.isValidRead(record);
         }
 
         Struct after = (Struct) ((Struct) record.value()).get("after");
@@ -459,10 +479,10 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
 
         // insert
         if (insertRecordsDuringTest()) {
-            VerifyRecord.isValidInsert(record, "ID", 1);
+            VerifyRecord.isValidInsert(record, true);
         }
         else {
-            VerifyRecord.isValidRead(record, "ID", 1);
+            VerifyRecord.isValidRead(record);
         }
 
         Struct after = (Struct) ((Struct) record.value()).get("after");
@@ -470,6 +490,7 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
     }
 
     @Test
+    @SkipWhenRunWithApicurio
     public void intTypes() throws Exception {
         int expectedRecordCount = 0;
 
@@ -602,6 +623,7 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
     }
 
     @Test
+    @SkipWhenLogMiningStrategyIs(value = SkipWhenLogMiningStrategyIs.Strategy.HYBRID, reason = "Cannot use lob.enabled with Hybrid")
     public void clobTypes() throws Exception {
         int expectedRecordCount = 0;
 
@@ -688,13 +710,13 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
     }
 
     protected static void insertFpTypes() throws SQLException {
-        connection.execute("INSERT INTO debezium.type_fp VALUES (1, 1.1, 2.22, 3.33, 8.888, 4.4444, 5.555, 6.66, 1234.567891, 1234.567891, 77.323)");
+        connection.execute("INSERT INTO debezium.type_fp VALUES (1, 1.1, 2.22, 3.33, 8.888, 4.4444, 5.555, 6.66, 1234.567891, 1234.567891, 77.323, 77.323)");
         connection.execute("COMMIT");
     }
 
     protected static void insertIntTypes() throws SQLException {
         connection.execute(
-                "INSERT INTO debezium.type_int VALUES (1, 1, 22, 333, 4444, 5555, 99, 9999, 999999999, 999999999999999999, 94, 9949, 999999994, 999999999999999949, 9999999999, 9999999999, 1)");
+                "INSERT INTO debezium.type_int VALUES (1, 1, 22, 333, 4444, 5555, 99, 9999, 999999999, 999999999999999999, 94, 9949, 999999994, 999999999999999949, 99999999999999999999999999999999999949, 9999999999, 9999999999, 1)");
         connection.execute("COMMIT");
     }
 
@@ -776,5 +798,9 @@ public abstract class AbstractOracleDatatypesTest extends AbstractConnectorTest 
 
     private void assertRecord(Struct record, List<SchemaAndValueField> expected) {
         expected.forEach(schemaAndValueField -> schemaAndValueField.assertFor(record));
+    }
+
+    protected static boolean isHybridMiningStrategy() {
+        return OracleConnectorConfig.LogMiningStrategy.HYBRID.equals(TestHelper.logMiningStrategy());
     }
 }

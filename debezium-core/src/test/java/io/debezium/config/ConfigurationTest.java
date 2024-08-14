@@ -5,13 +5,14 @@
  */
 package io.debezium.config;
 
-import static io.debezium.relational.RelationalDatabaseConnectorConfig.COLUMN_BLACKLIST;
+import static io.debezium.config.CommonConnectorConfig.DATABASE_CONFIG_PREFIX;
+import static io.debezium.config.CommonConnectorConfig.DRIVER_CONFIG_PREFIX;
+import static io.debezium.config.CommonConnectorConfig.TOPIC_PREFIX;
 import static io.debezium.relational.RelationalDatabaseConnectorConfig.COLUMN_EXCLUDE_LIST;
 import static io.debezium.relational.RelationalDatabaseConnectorConfig.COLUMN_INCLUDE_LIST;
-import static io.debezium.relational.RelationalDatabaseConnectorConfig.COLUMN_WHITELIST;
+import static io.debezium.relational.RelationalDatabaseConnectorConfig.HOSTNAME;
 import static io.debezium.relational.RelationalDatabaseConnectorConfig.MSG_KEY_COLUMNS;
-import static io.debezium.relational.RelationalDatabaseConnectorConfig.SERVER_NAME;
-import static org.fest.assertions.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.List;
 import java.util.Properties;
@@ -25,7 +26,8 @@ import org.junit.Test;
 import io.debezium.doc.FixFor;
 import io.debezium.function.Predicates;
 import io.debezium.relational.RelationalDatabaseConnectorConfig;
-import io.debezium.relational.history.DatabaseHistory;
+import io.debezium.relational.history.SchemaHistory;
+import io.debezium.util.Collect;
 
 /**
  * @author Randall Hauch
@@ -84,19 +86,6 @@ public class ConfigurationTest {
 
     @Test
     @FixFor("DBZ-1962")
-    public void shouldThrowValidationOnDuplicateOldColumnFilterConfigurationOld() {
-        config = Configuration.create()
-                .with(COLUMN_WHITELIST, ".+aa")
-                .with(COLUMN_BLACKLIST, ".+bb")
-                .build();
-
-        List<String> errorMessages = config.validate(Field.setOf(COLUMN_BLACKLIST)).get(COLUMN_BLACKLIST.name()).errorMessages();
-        assertThat(errorMessages).isNotEmpty();
-        assertThat(errorMessages.get(0)).isEqualTo(RelationalDatabaseConnectorConfig.COLUMN_WHITELIST_ALREADY_SPECIFIED_ERROR_MSG);
-    }
-
-    @Test
-    @FixFor("DBZ-1962")
     public void shouldThrowValidationOnDuplicateOldColumnFilterConfiguration() {
         config = Configuration.create()
                 .with(COLUMN_INCLUDE_LIST, ".+aa")
@@ -105,7 +94,8 @@ public class ConfigurationTest {
 
         List<String> errorMessages = config.validate(Field.setOf(COLUMN_EXCLUDE_LIST)).get(COLUMN_EXCLUDE_LIST.name()).errorMessages();
         assertThat(errorMessages).isNotEmpty();
-        assertThat(errorMessages.get(0)).isEqualTo(RelationalDatabaseConnectorConfig.COLUMN_INCLUDE_LIST_ALREADY_SPECIFIED_ERROR_MSG);
+        assertThat(errorMessages.get(0))
+                .isEqualTo(Field.validationOutput(COLUMN_EXCLUDE_LIST, RelationalDatabaseConnectorConfig.COLUMN_INCLUDE_LIST_ALREADY_SPECIFIED_ERROR_MSG));
     }
 
     @Test
@@ -118,7 +108,8 @@ public class ConfigurationTest {
 
         List<String> errorMessages = config.validate(Field.setOf(COLUMN_EXCLUDE_LIST)).get(COLUMN_EXCLUDE_LIST.name()).errorMessages();
         assertThat(errorMessages).isNotEmpty();
-        assertThat(errorMessages.get(0)).isEqualTo(RelationalDatabaseConnectorConfig.COLUMN_INCLUDE_LIST_ALREADY_SPECIFIED_ERROR_MSG);
+        assertThat(errorMessages.get(0))
+                .isEqualTo(Field.validationOutput(COLUMN_EXCLUDE_LIST, RelationalDatabaseConnectorConfig.COLUMN_INCLUDE_LIST_ALREADY_SPECIFIED_ERROR_MSG));
     }
 
     @Test
@@ -217,26 +208,27 @@ public class ConfigurationTest {
      * which is just applied for that session emitting those statements).
      */
     @Test
-    @FixFor("DBZ-469")
+    @FixFor({ "DBZ-469", "DBZ-7271" })
     public void defaultDdlFilterShouldFilterOutRdsHeartbeatInsert() {
-        String defaultDdlFilter = Configuration.create().build().getString(DatabaseHistory.DDL_FILTER);
-        Predicate<String> ddlFilter = Predicates.includes(defaultDdlFilter);
+        String defaultDdlFilter = Configuration.create().build().getString(SchemaHistory.DDL_FILTER);
+        Predicate<String> ddlFilter = Predicates.includes(defaultDdlFilter, Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
         assertThat(ddlFilter.test("INSERT INTO mysql.rds_heartbeat2(id, value) values (1,1510678117058) ON DUPLICATE KEY UPDATE value = 1510678117058")).isTrue();
+        assertThat(ddlFilter.test("INSERT INTO rds_heartbeat2(id, value) values (1,1510678117058) ON DUPLICATE KEY UPDATE value = 1510678117058")).isTrue();
     }
 
     @Test
     @FixFor("DBZ-661")
     public void defaultDdlFilterShouldFilterOutFlushRelayLogs() {
-        String defaultDdlFilter = Configuration.create().build().getString(DatabaseHistory.DDL_FILTER);
-        Predicate<String> ddlFilter = Predicates.includes(defaultDdlFilter);
+        String defaultDdlFilter = Configuration.create().build().getString(SchemaHistory.DDL_FILTER);
+        Predicate<String> ddlFilter = Predicates.includes(defaultDdlFilter, Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
         assertThat(ddlFilter.test("FLUSH RELAY LOGS")).isTrue();
     }
 
     @Test
     @FixFor("DBZ-1492")
     public void defaultDdlFilterShouldFilterOutRdsSysinfoStatements() {
-        String defaultDdlFilter = Configuration.create().build().getString(DatabaseHistory.DDL_FILTER);
-        Predicate<String> ddlFilter = Predicates.includes(defaultDdlFilter);
+        String defaultDdlFilter = Configuration.create().build().getString(SchemaHistory.DDL_FILTER);
+        Predicate<String> ddlFilter = Predicates.includes(defaultDdlFilter, Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
         assertThat(ddlFilter.test("DELETE FROM mysql.rds_sysinfo where name = 'innodb_txn_key'")).isTrue();
         assertThat(ddlFilter.test("INSERT INTO mysql.rds_sysinfo(name, value) values ('innodb_txn_key','Thu Sep 19 19:38:23 UTC 2019')")).isTrue();
     }
@@ -244,21 +236,53 @@ public class ConfigurationTest {
     @Test
     @FixFor("DBZ-1775")
     public void defaultDdlFilterShouldFilterOutRdsMonitorStatements() {
-        String defaultDdlFilter = Configuration.create().build().getString(DatabaseHistory.DDL_FILTER);
-        Predicate<String> ddlFilter = Predicates.includes(defaultDdlFilter);
+        String defaultDdlFilter = Configuration.create().build().getString(SchemaHistory.DDL_FILTER);
+        Predicate<String> ddlFilter = Predicates.includes(defaultDdlFilter, Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
         assertThat(ddlFilter.test("DELETE FROM mysql.rds_monitor")).isTrue();
     }
 
     @Test
     @FixFor("DBZ-3762")
     public void defaultDdlFilterShouldFilterOutMySqlInlineComments() {
-        String defaultDdlFilter = Configuration.create().build().getString(DatabaseHistory.DDL_FILTER);
-        Predicate<String> ddlFilter = Predicates.includes(defaultDdlFilter);
+        String defaultDdlFilter = Configuration.create().build().getString(SchemaHistory.DDL_FILTER);
+        Predicate<String> ddlFilter = Predicates.includes(defaultDdlFilter, Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
         assertThat(ddlFilter.test("# Dummy event replacing event type 160")).isTrue();
         assertThat(ddlFilter.test("    # Dummy event with leading white space characters")).isTrue();
         // Other statements which don't contain comments only or e.g. Postgres JSON filter by path shouldn't be removed.
         assertThat(ddlFilter.test("INSERT INTO test(id) VALUES (1001); # test insert")).isFalse();
         assertThat(ddlFilter.test("SELECT '[1, 2, 3]'::JSONB #> '{1}';")).isFalse();
+    }
+
+    @Test
+    @FixFor("DBZ-5709")
+    public void customDdlFilterShouldFilterOutMySqlCreateViewStatements() {
+        String customDdlFilter = Configuration.create().with(SchemaHistory.DDL_FILTER, "CREATE.*VIEW.*")
+                .build().getString(SchemaHistory.DDL_FILTER);
+        Predicate<String> ddlFilter = Predicates.includes(customDdlFilter, Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+        String createView = "create algorithm=undefined definer=`bi_rw`@`172.29.%` sql security definer view \n" +
+                "v_some_table as (\n" +
+                "with a as (select * from some_table) \n" +
+                "select * from a\n" +
+                ");";
+        assertThat(ddlFilter.test(createView)).isTrue();
+    }
+
+    @Test
+    @FixFor("DBZ-6840")
+    public void defaultDdlFilterShouldNotFilterMariaDBComments() {
+        String defaultDdlFilter = Configuration.create().build().getString(SchemaHistory.DDL_FILTER);
+        Predicate<String> ddlFilter = Predicates.includes(defaultDdlFilter, Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+        assertThat(ddlFilter.test("# Create the new ENTITY table which will be the parent of all other resource tables.\n" +
+                "CREATE TABLE IF NOT EXISTS ENTITY (\n" +
+                " ID BIGINT AUTO_INCREMENT PRIMARY KEY,\n" +
+                " ENTITY_UUID VARCHAR(255) NOT NULL,\n" +
+                " ENTITY_TYPE VARCHAR(255) NULL,\n" +
+                " CREATED_ON DATETIME(6)  NULL,\n" +
+                " UPDATED_ON DATETIME(6)  NULL,\n" +
+                " CREATED_BY VARCHAR(255) NULL,\n" +
+                " UPDATED_BY VARCHAR(255) NULL,\n" +
+                " CONSTRAINT UI_ENTITY_UUID UNIQUE (ENTITY_UUID)\n" +
+                ")")).isFalse();
     }
 
     @Test
@@ -271,7 +295,7 @@ public class ConfigurationTest {
         // empty field: error
         config = Configuration.create().with(MSG_KEY_COLUMNS, "").build();
         errorList = config.validate(Field.setOf(MSG_KEY_COLUMNS)).get(MSG_KEY_COLUMNS.name()).errorMessages();
-        assertThat(errorList.get(0)).isEqualTo("Must not be empty");
+        assertThat(errorList.get(0)).isEqualTo(Field.validationOutput(MSG_KEY_COLUMNS, "Must not be empty"));
         // field: ok
         config = Configuration.create().with(MSG_KEY_COLUMNS, "t1:C1").build();
         assertThat(config.validate(Field.setOf(MSG_KEY_COLUMNS)).get(MSG_KEY_COLUMNS.name()).errorMessages()).isEmpty();
@@ -290,7 +314,7 @@ public class ConfigurationTest {
         // field: invalid format
         config = Configuration.create().with(MSG_KEY_COLUMNS, "t1,t2").build();
         errorList = config.validate(Field.setOf(MSG_KEY_COLUMNS)).get(MSG_KEY_COLUMNS.name()).errorMessages();
-        assertThat(errorList.get(0)).isEqualTo("t1,t2 has an invalid format (expecting '^\\s*([^\\s:]+):([^:\\s]+)\\s*$')");
+        assertThat(errorList.get(0)).isEqualTo(Field.validationOutput(MSG_KEY_COLUMNS, "t1,t2 has an invalid format (expecting '^\\s*([^\\s:]+):([^:\\s]+)\\s*$')"));
     }
 
     @Test
@@ -303,34 +327,79 @@ public class ConfigurationTest {
         // field : invalid format
         config = Configuration.create().with(MSG_KEY_COLUMNS, "t1:C1;(.*).t2:C1,C2;t3.C1;").build();
         errorList = config.validate(Field.setOf(MSG_KEY_COLUMNS)).get(MSG_KEY_COLUMNS.name()).errorMessages();
-        assertThat(errorList.get(0)).isEqualTo("t3.C1 has an invalid format (expecting '^\\s*([^\\s:]+):([^:\\s]+)\\s*$')");
+        assertThat(errorList.get(0)).isEqualTo(Field.validationOutput(MSG_KEY_COLUMNS, "t3.C1 has an invalid format (expecting '^\\s*([^\\s:]+):([^:\\s]+)\\s*$')"));
 
         // field : invalid format
         config = Configuration.create().with(MSG_KEY_COLUMNS, "t1:C1;(.*).t2:C1,C2;t3;").build();
         errorList = config.validate(Field.setOf(MSG_KEY_COLUMNS)).get(MSG_KEY_COLUMNS.name()).errorMessages();
-        assertThat(errorList.get(0)).isEqualTo("t3 has an invalid format (expecting '^\\s*([^\\s:]+):([^:\\s]+)\\s*$')");
+        assertThat(errorList.get(0)).isEqualTo(Field.validationOutput(MSG_KEY_COLUMNS, "t3 has an invalid format (expecting '^\\s*([^\\s:]+):([^:\\s]+)\\s*$')"));
 
         // field : invalid format
         config = Configuration.create().with(MSG_KEY_COLUMNS, "t1:C1;foobar").build();
         errorList = config.validate(Field.setOf(MSG_KEY_COLUMNS)).get(MSG_KEY_COLUMNS.name()).errorMessages();
-        assertThat(errorList.get(0)).isEqualTo("foobar has an invalid format (expecting '^\\s*([^\\s:]+):([^:\\s]+)\\s*$')");
+        assertThat(errorList.get(0)).isEqualTo(Field.validationOutput(MSG_KEY_COLUMNS, "foobar has an invalid format (expecting '^\\s*([^\\s:]+):([^:\\s]+)\\s*$')"));
     }
 
     @Test
     @FixFor("DBZ-3427")
     public void testServerNameValidation() {
         List<String> errorList;
-        config = Configuration.create().with(SERVER_NAME, "server_11").build();
-        assertThat(config.validate(Field.setOf(SERVER_NAME)).get(SERVER_NAME.name()).errorMessages()).isEmpty();
+        config = Configuration.create().with(TOPIC_PREFIX, "server_11").build();
+        assertThat(config.validate(Field.setOf(TOPIC_PREFIX)).get(TOPIC_PREFIX.name()).errorMessages()).isEmpty();
 
-        config = Configuration.create().with(SERVER_NAME, "server-12").build();
-        assertThat(config.validate(Field.setOf(SERVER_NAME)).get(SERVER_NAME.name()).errorMessages()).isEmpty();
+        config = Configuration.create().with(TOPIC_PREFIX, "server-12").build();
+        assertThat(config.validate(Field.setOf(TOPIC_PREFIX)).get(TOPIC_PREFIX.name()).errorMessages()).isEmpty();
 
-        config = Configuration.create().with(SERVER_NAME, "server.12").build();
-        assertThat(config.validate(Field.setOf(SERVER_NAME)).get(SERVER_NAME.name()).errorMessages()).isEmpty();
+        config = Configuration.create().with(TOPIC_PREFIX, "server.12").build();
+        assertThat(config.validate(Field.setOf(TOPIC_PREFIX)).get(TOPIC_PREFIX.name()).errorMessages()).isEmpty();
 
-        config = Configuration.create().with(SERVER_NAME, "server@X").build();
-        errorList = config.validate(Field.setOf(SERVER_NAME)).get(SERVER_NAME.name()).errorMessages();
-        assertThat(errorList.get(0)).isEqualTo("server@X has invalid format (only the underscore, hyphen, dot and alphanumeric characters are allowed)");
+        config = Configuration.create().with(TOPIC_PREFIX, "server@X").build();
+        errorList = config.validate(Field.setOf(TOPIC_PREFIX)).get(TOPIC_PREFIX.name()).errorMessages();
+        assertThat(errorList.get(0))
+                .isEqualTo(
+                        Field.validationOutput(TOPIC_PREFIX, "server@X has invalid format (only the underscore, hyphen, dot and alphanumeric characters are allowed)"));
+    }
+
+    @Test
+    @FixFor("DBZ-6156")
+    public void testHostnameValidation() {
+        config = Configuration.create().with(HOSTNAME, "").build();
+        assertThat(config.validate(Field.setOf(HOSTNAME)).get(HOSTNAME.name()).errorMessages().get(0))
+                .isEqualTo("The 'database.hostname' value is invalid: A value is required");
+
+        List<String> invalidHostnames = Collect.arrayListOf("~hostname", "hostname@", "host-*-name", "(hostname)", "hostname?inject_parameter=1234");
+        String errorMessage = " has invalid format (only the underscore, hyphen, dot and alphanumeric characters are allowed)";
+        invalidHostnames.stream().forEach(hostname -> {
+            config = Configuration.create().with(HOSTNAME, hostname).build();
+            List<String> errorList = config.validate(Field.setOf(HOSTNAME)).get(HOSTNAME.name()).errorMessages();
+            assertThat(errorList.get(0)).isEqualTo(Field.validationOutput(HOSTNAME, hostname + errorMessage));
+        });
+    }
+
+    @Test
+    @FixFor("DBZ-5801")
+    public void testConfigurationMerge() {
+        config = Configuration.create()
+                .with("database.hostname", "server1")
+                .with("driver.user", "mysqluser")
+                .build();
+
+        Configuration dbConfig = config
+                .subset(DATABASE_CONFIG_PREFIX, true)
+                .merge(config.subset(DRIVER_CONFIG_PREFIX, true));
+
+        assertThat(dbConfig.keys().size()).isEqualTo(2);
+        assertThat(dbConfig.getString("user")).isEqualTo("mysqluser");
+    }
+
+    @Test
+    @FixFor("DBZ-6864")
+    public void defaultDdlFilterShouldFilterOutRdsSetStatements() {
+        String defaultDdlFilter = Configuration.create().build().getString(SchemaHistory.DDL_FILTER);
+        Predicate<String> ddlFilter = Predicates.includes(defaultDdlFilter, Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+        assertThat(ddlFilter.test("SET STATEMENT max_statement_time=60 FOR DELETE FROM mysql.rds_sysinfo where name = 'innodb_txn_key'")).isTrue();
+        assertThat(ddlFilter.test(
+                "SET STATEMENT max_statement_time=60 FOR INSERT INTO mysql.rds_heartbeat2(id, value) values (1,1692866524004) ON DUPLICATE KEY UPDATE value = 1692866524004"))
+                .isTrue();
     }
 }

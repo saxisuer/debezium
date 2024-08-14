@@ -18,9 +18,9 @@ import io.fabric8.kubernetes.client.dsl.NonNamespaceOperation;
 import io.fabric8.kubernetes.client.dsl.Resource;
 import io.fabric8.openshift.client.OpenShiftClient;
 import io.strimzi.api.kafka.Crds;
-import io.strimzi.api.kafka.KafkaConnectorList;
-import io.strimzi.api.kafka.model.KafkaConnect;
-import io.strimzi.api.kafka.model.KafkaConnector;
+import io.strimzi.api.kafka.model.connect.KafkaConnect;
+import io.strimzi.api.kafka.model.connector.KafkaConnector;
+import io.strimzi.api.kafka.model.connector.KafkaConnectorList;
 
 public class CustomResourceConnectorDeployer implements ConnectorDeployer {
     private static final Logger LOGGER = LoggerFactory.getLogger(CustomResourceConnectorDeployer.class);
@@ -74,8 +74,10 @@ public class CustomResourceConnectorDeployer implements ConnectorDeployer {
      * @param name name of the connector
      */
     private void waitForKafkaConnector(String name) {
+        LOGGER.info("Waiting for connector '" + name + "' to become ready.");
         kafkaConnectorOperation()
                 .withName(name)
                 .waitUntilCondition(WaitConditions::kafkaReadyCondition, 5, MINUTES);
+        LOGGER.info("Connector '" + name + "' is ready.");
     }
 }

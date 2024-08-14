@@ -6,28 +6,30 @@
 package io.debezium.connector.oracle.xstream;
 
 import java.sql.SQLException;
+import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.debezium.DebeziumException;
 import io.debezium.connector.oracle.OracleConnection;
 import io.debezium.connector.oracle.OracleConnectorConfig;
 import io.debezium.connector.oracle.OracleDatabaseSchema;
 import io.debezium.connector.oracle.OracleDatabaseVersion;
 import io.debezium.connector.oracle.OracleOffsetContext;
 import io.debezium.connector.oracle.OraclePartition;
-import io.debezium.connector.oracle.OracleStreamingChangeEventSourceMetrics;
 import io.debezium.connector.oracle.Scn;
 import io.debezium.connector.oracle.SourceInfo;
 import io.debezium.connector.oracle.StreamingAdapter.TableNameCaseSensitivity;
 import io.debezium.pipeline.ErrorHandler;
 import io.debezium.pipeline.EventDispatcher;
+import io.debezium.pipeline.source.snapshot.incremental.SignalBasedIncrementalSnapshotContext;
 import io.debezium.pipeline.source.spi.StreamingChangeEventSource;
+import io.debezium.pipeline.txmetadata.TransactionContext;
 import io.debezium.relational.TableId;
 import io.debezium.util.Clock;
-import io.debezium.util.Strings;
 
 import oracle.sql.NUMBER;
 import oracle.streams.StreamsException;
@@ -44,13 +46,16 @@ public class XstreamStreamingChangeEventSource implements StreamingChangeEventSo
 
     private static final Logger LOGGER = LoggerFactory.getLogger(XstreamStreamingChangeEventSource.class);
 
+    private static final int DEFAULT_MAX_ATTACH_RETRIES = 10;
+    private static final int DEFAULT_MAX_ATTACH_RETRY_DELAY_SECONDS = 10;
+
     private final OracleConnectorConfig connectorConfig;
     private final OracleConnection jdbcConnection;
     private final EventDispatcher<OraclePartition, TableId> dispatcher;
     private final ErrorHandler errorHandler;
     private final Clock clock;
     private final OracleDatabaseSchema schema;
-    private final OracleStreamingChangeEventSourceMetrics streamingMetrics;
+    private final XStreamStreamingChangeEventSourceMetrics streamingMetrics;
     private final String xStreamServerName;
     private volatile XStreamOut xsOut;
     private final int posVersion;
@@ -62,11 +67,12 @@ public class XstreamStreamingChangeEventSource implements StreamingChangeEventSo
      * internal Oracle code locking.
      */
     private final AtomicReference<PositionAndScn> lcrMessage = new AtomicReference<>();
+    private OracleOffsetContext effectiveOffset;
 
     public XstreamStreamingChangeEventSource(OracleConnectorConfig connectorConfig, OracleConnection jdbcConnection,
                                              EventDispatcher<OraclePartition, TableId> dispatcher, ErrorHandler errorHandler,
                                              Clock clock, OracleDatabaseSchema schema,
-                                             OracleStreamingChangeEventSourceMetrics streamingMetrics) {
+                                             XStreamStreamingChangeEventSourceMetrics streamingMetrics) {
         this.connectorConfig = connectorConfig;
         this.jdbcConnection = jdbcConnection;
         this.dispatcher = dispatcher;
@@ -79,15 +85,29 @@ public class XstreamStreamingChangeEventSource implements StreamingChangeEventSo
     }
 
     @Override
+    public void init(OracleOffsetContext offsetContext) throws InterruptedException {
+        this.effectiveOffset = offsetContext == null ? emptyContext() : offsetContext;
+    }
+
+    private OracleOffsetContext emptyContext() {
+        return OracleOffsetContext.create().logicalName(connectorConfig)
+                .snapshotPendingTransactions(Collections.emptyMap())
+                .transactionContext(new TransactionContext())
+                .incrementalSnapshotContext(new SignalBasedIncrementalSnapshotContext<>()).build();
+    }
+
+    @Override
     public void execute(ChangeEventSourceContext context, OraclePartition partition, OracleOffsetContext offsetContext)
             throws InterruptedException {
+
+        this.effectiveOffset = offsetContext;
 
         LcrEventHandler eventHandler = new LcrEventHandler(connectorConfig, errorHandler, dispatcher, clock, schema,
                 partition, offsetContext,
                 TableNameCaseSensitivity.INSENSITIVE.equals(connectorConfig.getAdapter().getTableNameCaseSensitivity(jdbcConnection)),
                 this, streamingMetrics);
 
-        try (OracleConnection xsConnection = new OracleConnection(jdbcConnection.config(), () -> getClass().getClassLoader())) {
+        try (OracleConnection xsConnection = new OracleConnection(jdbcConnection.config())) {
             try {
                 // 1. connect
                 final byte[] startPosition;
@@ -99,14 +119,23 @@ public class XstreamStreamingChangeEventSource implements StreamingChangeEventSo
                     startPosition = convertScnToPosition(offsetContext.getScn());
                 }
 
-                xsOut = XStreamOut.attach((oracle.jdbc.OracleConnection) xsConnection.connection(), xStreamServerName,
-                        startPosition, 1, 1, XStreamOut.DEFAULT_MODE);
+                xsOut = performAttachWithRetries(xsConnection, startPosition);
+                if (xsOut == null) {
+                    throw new DebeziumException("Failed to attach to the Oracle XStream outbound server");
+                }
 
                 // 2. receive events while running
                 while (context.isRunning()) {
                     LOGGER.trace("Receiving LCR");
                     xsOut.receiveLCRCallback(eventHandler, XStreamOut.DEFAULT_MODE);
                     dispatcher.dispatchHeartbeatEvent(partition, offsetContext);
+
+                    if (context.isPaused()) {
+                        LOGGER.info("Streaming will now pause");
+                        context.streamingPaused();
+                        context.waitSnapshotCompletion();
+                        LOGGER.info("Streaming resumed");
+                    }
                 }
             }
             finally {
@@ -129,7 +158,7 @@ public class XstreamStreamingChangeEventSource implements StreamingChangeEventSo
     }
 
     @Override
-    public void commitOffset(Map<String, ?> offset) {
+    public void commitOffset(Map<String, ?> partition, Map<String, ?> offset) {
         if (xsOut != null) {
             LOGGER.debug("Sending message to request recording of offsets to Oracle");
             final LcrPosition lcrPosition = LcrPosition.valueOf((String) offset.get(SourceInfo.LCR_POSITION_KEY));
@@ -138,6 +167,41 @@ public class XstreamStreamingChangeEventSource implements StreamingChangeEventSo
             // (last) delivered value in a single step instead of incrementally
             sendPublishedPosition(lcrPosition, scn);
         }
+    }
+
+    @Override
+    public OracleOffsetContext getOffsetContext() {
+        return effectiveOffset;
+    }
+
+    private XStreamOut performAttachWithRetries(OracleConnection xsConnection, byte[] startPosition) throws Exception {
+        XStreamOut out = null;
+        for (int attempt = 1; attempt <= DEFAULT_MAX_ATTACH_RETRIES; attempt++) {
+            try {
+                out = XStreamOut.attach((oracle.jdbc.OracleConnection) xsConnection.connection(), xStreamServerName,
+                        startPosition, 1, 1, XStreamOut.DEFAULT_MODE);
+                break;
+            }
+            catch (StreamsException e) {
+                if (!isAttachExceptionRetriable(e) || attempt == DEFAULT_MAX_ATTACH_RETRIES) {
+                    if (attempt == DEFAULT_MAX_ATTACH_RETRIES) {
+                        LOGGER.warn("Failed to attach to outbound server with max attempts", e);
+                    }
+                    throw e;
+                }
+                LOGGER.warn("Failed to attach to outbound server, retrying: {}", e.getMessage());
+            }
+        }
+        return out;
+    }
+
+    private boolean isAttachExceptionRetriable(StreamsException e) {
+        return e.getErrorCode() == 26653
+                || e.getErrorCode() == 23656
+                || e.getErrorCode() == 26928
+                || e.getMessage().contains("did not start properly and is currently in state")
+                || e.getMessage().contains("Timeout occurred while starting XStream process")
+                || e.getMessage().contains("Unable to communicate with XStream apply coordinator process");
     }
 
     private byte[] convertScnToPosition(Scn scn) {
@@ -172,16 +236,6 @@ public class XstreamStreamingChangeEventSource implements StreamingChangeEventSo
     }
 
     private static int resolvePosVersion(OracleConnection connection, OracleConnectorConfig connectorConfig) {
-        // Option 'internal.database.oracle.version' takes precedence
-        final String oracleVersion = connectorConfig.getOracleVersion();
-        if (!Strings.isNullOrEmpty(oracleVersion)) {
-            if ("11".equals(oracleVersion)) {
-                return XStreamUtility.POS_VERSION_V1;
-            }
-            return XStreamUtility.POS_VERSION_V2;
-        }
-
-        // As fallback, resolve this based on the OracleDatabaseVersion
         final OracleDatabaseVersion databaseVersion = connection.getOracleVersion();
         if (databaseVersion.getMajor() == 11 || (databaseVersion.getMajor() == 12 && databaseVersion.getMaintenance() < 2)) {
             return XStreamUtility.POS_VERSION_V1;

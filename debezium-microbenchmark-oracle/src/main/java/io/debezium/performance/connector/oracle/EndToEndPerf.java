@@ -43,6 +43,7 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
 
+import io.debezium.config.CommonConnectorConfig;
 import io.debezium.config.Configuration;
 import io.debezium.connector.oracle.OracleConnection;
 import io.debezium.connector.oracle.OracleConnector;
@@ -51,8 +52,9 @@ import io.debezium.connector.oracle.OracleConnectorConfig.ConnectorAdapter;
 import io.debezium.connector.oracle.OracleConnectorConfig.LogMiningStrategy;
 import io.debezium.connector.oracle.OracleConnectorConfig.SnapshotMode;
 import io.debezium.embedded.EmbeddedEngine;
+import io.debezium.embedded.EmbeddedEngineConfig;
 import io.debezium.jdbc.JdbcConfiguration;
-import io.debezium.relational.history.FileDatabaseHistory;
+import io.debezium.storage.file.history.FileSchemaHistory;
 import io.debezium.util.IoUtil;
 
 /**
@@ -111,31 +113,31 @@ public class EndToEndPerf {
             delete("history.txt");
 
             Configuration connectorConfig = defaultConnectorConfig()
-                    .with(OracleConnectorConfig.SNAPSHOT_MODE, SnapshotMode.SCHEMA_ONLY)
+                    .with(OracleConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NO_DATA)
                     .with(OracleConnectorConfig.TABLE_INCLUDE_LIST, "DEBEZIUM\\.TEST")
                     .with(OracleConnectorConfig.LOG_MINING_STRATEGY, LogMiningStrategy.parse(miningStrategy))
                     .build();
 
             Configuration config = Configuration.copy(connectorConfig)
-                    .with(EmbeddedEngine.ENGINE_NAME, "benchmark")
-                    .with(EmbeddedEngine.CONNECTOR_CLASS, OracleConnector.class)
+                    .with(EmbeddedEngineConfig.ENGINE_NAME, "benchmark")
+                    .with(EmbeddedEngineConfig.CONNECTOR_CLASS, OracleConnector.class)
                     .with(StandaloneConfig.OFFSET_STORAGE_FILE_FILENAME_CONFIG, getPath("offsets.txt").toAbsolutePath())
-                    .with(EmbeddedEngine.OFFSET_FLUSH_INTERVAL_MS, 0)
+                    .with(EmbeddedEngineConfig.OFFSET_FLUSH_INTERVAL_MS, 0)
                     .build();
 
             Consumer<SourceRecord> recordArrivedListener = this::processRecord;
-            this.engine = EmbeddedEngine.create()
-                    .using(config)
+            this.engine = (EmbeddedEngine) new EmbeddedEngine.EngineBuilder()
+                    .using(config.asProperties())
                     .notifying((record) -> {
                         if (!engine.isRunning() || Thread.currentThread().isInterrupted()) {
                             return;
                         }
-                        while (!consumedLines.offer(record)) {
+                        while (!consumedLines.offer((SourceRecord) record)) {
                             if (!engine.isRunning() || Thread.currentThread().isInterrupted()) {
                                 return;
                             }
                         }
-                        recordArrivedListener.accept(record);
+                        recordArrivedListener.accept((SourceRecord) record);
                     })
                     .using(this.getClass().getClassLoader())
                     .build();
@@ -235,12 +237,12 @@ public class EndToEndPerf {
             Configuration.Builder builder = Configuration.create();
             jdbcConfiguration.forEach((f, v) -> builder.with(OracleConnectorConfig.DATABASE_CONFIG_PREFIX + f, v));
 
-            return builder.with(OracleConnectorConfig.SERVER_NAME, SERVER_NAME)
+            return builder.with(CommonConnectorConfig.TOPIC_PREFIX, SERVER_NAME)
                     .with(OracleConnectorConfig.PDB_NAME, "ORCLPDB1")
                     .with(OracleConnectorConfig.INCLUDE_SCHEMA_CHANGES, false)
                     .with(OracleConnectorConfig.CONNECTOR_ADAPTER, ConnectorAdapter.LOG_MINER)
-                    .with(OracleConnectorConfig.DATABASE_HISTORY, FileDatabaseHistory.class)
-                    .with(FileDatabaseHistory.FILE_PATH, getPath("history.txt"));
+                    .with(OracleConnectorConfig.SCHEMA_HISTORY, FileSchemaHistory.class)
+                    .with(FileSchemaHistory.FILE_PATH, getPath("history.txt"));
         }
 
         private Configuration.Builder testConfig() {
@@ -251,7 +253,7 @@ public class EndToEndPerf {
         }
 
         private OracleConnection getTestConnection() {
-            OracleConnection connection = new OracleConnection(testJdbcConfig(), EndToEndPerf.class::getClassLoader);
+            OracleConnection connection = new OracleConnection(testJdbcConfig());
             try {
                 connection.setAutoCommit(false);
             }

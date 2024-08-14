@@ -7,10 +7,11 @@ package io.debezium.pipeline.source.spi;
 
 import java.util.Optional;
 
+import io.debezium.pipeline.notification.NotificationService;
 import io.debezium.pipeline.source.snapshot.incremental.IncrementalSnapshotChangeEventSource;
 import io.debezium.pipeline.spi.OffsetContext;
 import io.debezium.pipeline.spi.Partition;
-import io.debezium.schema.DataCollectionId;
+import io.debezium.spi.schema.DataCollectionId;
 
 /**
  * A factory for creating {@link ChangeEventSource}s specific to one database.
@@ -31,7 +32,7 @@ public interface ChangeEventSourceFactory<P extends Partition, O extends OffsetC
      *
      * @return A snapshot change event source
      */
-    SnapshotChangeEventSource<P, O> getSnapshotChangeEventSource(SnapshotProgressListener<P> snapshotProgressListener);
+    SnapshotChangeEventSource<P, O> getSnapshotChangeEventSource(SnapshotProgressListener<P> snapshotProgressListener, NotificationService<P, O> notificationService);
 
     /**
      * Returns a streaming change event source that starts streaming at the given offset.
@@ -51,7 +52,8 @@ public interface ChangeEventSourceFactory<P extends Partition, O extends OffsetC
      */
     default Optional<IncrementalSnapshotChangeEventSource<P, ? extends DataCollectionId>> getIncrementalSnapshotChangeEventSource(O offsetContext,
                                                                                                                                   SnapshotProgressListener<P> snapshotProgressListener,
-                                                                                                                                  DataChangeEventListener<P> dataChangeEventListener) {
+                                                                                                                                  DataChangeEventListener<P> dataChangeEventListener,
+                                                                                                                                  NotificationService<P, O> notificationService) {
         return Optional.empty();
     }
 }

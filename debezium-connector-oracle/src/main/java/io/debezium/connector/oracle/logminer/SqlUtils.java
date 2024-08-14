@@ -9,7 +9,6 @@ import java.time.Duration;
 
 import io.debezium.connector.oracle.OracleConnectorConfig;
 import io.debezium.connector.oracle.Scn;
-import io.debezium.relational.TableId;
 import io.debezium.util.Strings;
 
 /**
@@ -68,11 +67,11 @@ public class SqlUtils {
         return String.format("SELECT 'KEY', SUPPLEMENTAL_LOG_DATA_MIN FROM %s", DATABASE_VIEW);
     }
 
-    static String tableSupplementalLoggingCheckQuery(TableId tableId) {
-        return String.format("SELECT 'KEY', LOG_GROUP_TYPE FROM %s WHERE OWNER = '%s' AND TABLE_NAME = '%s'", ALL_LOG_GROUPS, tableId.schema(), tableId.table());
+    static String tableSupplementalLoggingCheckQuery() {
+        return String.format("SELECT 'KEY', LOG_GROUP_TYPE FROM %s WHERE OWNER=? AND TABLE_NAME=?", ALL_LOG_GROUPS);
     }
 
-    static String oldestFirstChangeQuery(Duration archiveLogRetention, String archiveDestinationName) {
+    public static String oldestFirstChangeQuery(Duration archiveLogRetention, String archiveDestinationName) {
         final StringBuilder sb = new StringBuilder();
         sb.append("SELECT MIN(FIRST_CHANGE#) FROM (SELECT MIN(FIRST_CHANGE#) AS FIRST_CHANGE# ");
         sb.append("FROM ").append(LOG_VIEW).append(" ");
@@ -104,13 +103,13 @@ public class SqlUtils {
         // The first part of the union query generated is as follows:
         //
         // SELECT MIN(F.MEMBER) AS FILE_NAME, L.FIRST_CHANGE# FIRST_CHANGE, L.NEXT_CHANGE# NEXT_CHANGE, L.ARCHIVED,
-        // L.STATUS, 'ONLINE' AS TYPE, L.SEQUENCE# AS SEQ, 'NO' AS DICT_START, 'NO AS DICT_END
+        // L.STATUS, 'ONLINE' AS TYPE, L.SEQUENCE# AS SEQ, 'NO' AS DICT_START, 'NO' AS DICT_END, L.THREAD# AS THREAD
         // FROM V$LOGFILE F, V$LOG L
         // LEFT JOIN V$ARCHIVED_LOG A
         // ON A.FIRST_CHANGE# = L.FIRST_CHANGE# AND A.NEXT_CHANGE# = L.NEXT_CHANGE#
         // WHERE (A.FIRST_CHANGE# IS NULL OR A.STATUS <> 'A')
         // AND F.GROUP# = L.GROUP#
-        // GROUP BY F.GROUP#, L.FIRST_CHANGE#, L.NEXT_CHANGE#, L.STATUS, L.ARCHIVED, L.SEQUENCE#
+        // GROUP BY F.GROUP#, L.FIRST_CHANGE#, L.NEXT_CHANGE#, L.STATUS, L.ARCHIVED, L.SEQUENCE#, L.THREAD#
         //
         // The above query joins the redo logs view with the archived logs view, excluding any redo log that has
         // already been archived and has a matching redo log SCN range in the archive logs view. This allows
@@ -121,7 +120,7 @@ public class SqlUtils {
         // The second part of the union query:
         //
         // SELECT A.NAME AS FILE_NAME, A.FIRST_CHANGE# FIRST_CHANGE, A.NEXT_CHANGE# NEXT_CHANGE, 'YES',
-        // NULL, 'ARCHIVED', A.SEQUENCE# AS SEQ, A.DICTIONARY_BEGIN, A.DICTIONARY_END
+        // NULL, 'ARCHIVED', A.SEQUENCE# AS SEQ, A.DICTIONARY_BEGIN, A.DICTIONARY_END, A.THREAD# AS THREAD
         // FROM V$ARCHIVED_LOG A
         // WHERE A.NAME IS NOT NULL
         // AND A.ARCHIVED = 'YES'
@@ -145,17 +144,18 @@ public class SqlUtils {
         final StringBuilder sb = new StringBuilder();
         if (!archiveLogOnlyMode) {
             sb.append("SELECT MIN(F.MEMBER) AS FILE_NAME, L.FIRST_CHANGE# FIRST_CHANGE, L.NEXT_CHANGE# NEXT_CHANGE, L.ARCHIVED, ");
-            sb.append("L.STATUS, 'ONLINE' AS TYPE, L.SEQUENCE# AS SEQ, 'NO' AS DICT_START, 'NO' AS DICT_END ");
+            sb.append("L.STATUS, 'ONLINE' AS TYPE, L.SEQUENCE# AS SEQ, 'NO' AS DICT_START, 'NO' AS DICT_END, L.THREAD# AS THREAD ");
             sb.append("FROM ").append(LOGFILE_VIEW).append(" F, ").append(LOG_VIEW).append(" L ");
             sb.append("LEFT JOIN ").append(ARCHIVED_LOG_VIEW).append(" A ");
             sb.append("ON A.FIRST_CHANGE# = L.FIRST_CHANGE# AND A.NEXT_CHANGE# = L.NEXT_CHANGE# ");
             sb.append("WHERE (A.STATUS <> 'A' OR A.FIRST_CHANGE# IS NULL) ");
+            sb.append("AND L.STATUS != 'UNUSED' ");
             sb.append("AND F.GROUP# = L.GROUP# ");
-            sb.append("GROUP BY F.GROUP#, L.FIRST_CHANGE#, L.NEXT_CHANGE#, L.STATUS, L.ARCHIVED, L.SEQUENCE# ");
+            sb.append("GROUP BY F.GROUP#, L.FIRST_CHANGE#, L.NEXT_CHANGE#, L.STATUS, L.ARCHIVED, L.SEQUENCE#, L.THREAD# ");
             sb.append("UNION ");
         }
         sb.append("SELECT A.NAME AS FILE_NAME, A.FIRST_CHANGE# FIRST_CHANGE, A.NEXT_CHANGE# NEXT_CHANGE, 'YES', ");
-        sb.append("NULL, 'ARCHIVED', A.SEQUENCE# AS SEQ, A.DICTIONARY_BEGIN, A.DICTIONARY_END ");
+        sb.append("NULL, 'ARCHIVED', A.SEQUENCE# AS SEQ, A.DICTIONARY_BEGIN, A.DICTIONARY_END, A.THREAD# AS THREAD ");
         sb.append("FROM ").append(ARCHIVED_LOG_VIEW).append(" A ");
         sb.append("WHERE A.NAME IS NOT NULL ");
         sb.append("AND A.ARCHIVED = 'YES' ");
@@ -196,9 +196,10 @@ public class SqlUtils {
      * @param startScn mine from
      * @param endScn mine till
      * @param strategy Log Mining strategy
+     * @param continuousMining whether to use continuous mining
      * @return statement todo: handle corruption. STATUS (Double) — value of 0 indicates it is executable
      */
-    static String startLogMinerStatement(Scn startScn, Scn endScn, OracleConnectorConfig.LogMiningStrategy strategy, boolean isContinuousMining) {
+    static String startLogMinerStatement(Scn startScn, Scn endScn, OracleConnectorConfig.LogMiningStrategy strategy, boolean continuousMining) {
         String miningStrategy;
         if (strategy.equals(OracleConnectorConfig.LogMiningStrategy.CATALOG_IN_REDO)) {
             miningStrategy = "DBMS_LOGMNR.DICT_FROM_REDO_LOGS + DBMS_LOGMNR.DDL_DICT_TRACKING ";
@@ -206,7 +207,7 @@ public class SqlUtils {
         else {
             miningStrategy = "DBMS_LOGMNR.DICT_FROM_ONLINE_CATALOG ";
         }
-        if (isContinuousMining) {
+        if (continuousMining) {
             miningStrategy += " + DBMS_LOGMNR.CONTINUOUS_MINE ";
         }
         return "BEGIN sys.dbms_logmnr.start_logmnr(" +
@@ -225,13 +226,13 @@ public class SqlUtils {
         return "BEGIN SYS.DBMS_LOGMNR.REMOVE_LOGFILE(LOGFILENAME => '" + fileName + "');END;";
     }
 
-    /**
-     * This method return query which converts given SCN in days and deduct from the current day
-     */
-    public static String diffInDaysQuery(Scn scn) {
+    public static String getScnByTimeDeltaQuery(Scn scn, Duration duration) {
         if (scn == null) {
             return null;
         }
-        return "select sysdate - CAST(scn_to_timestamp(" + scn.toString() + ") as date) from dual";
+
+        return "select timestamp_to_scn(CAST(scn_to_timestamp(" + scn.toString() + ") as date)" +
+                " - INTERVAL '" + duration.toMinutes() + "' MINUTE) from dual";
     }
+
 }

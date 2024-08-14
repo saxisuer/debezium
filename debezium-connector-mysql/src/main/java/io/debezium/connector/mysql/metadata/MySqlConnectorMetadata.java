@@ -16,12 +16,11 @@ public class MySqlConnectorMetadata implements ConnectorMetadata {
 
     @Override
     public ConnectorDescriptor getConnectorDescriptor() {
-        return new ConnectorDescriptor("mysql", "Debezium MySQL Connector", MySqlConnector.class.getName(), Module.version());
+        return new ConnectorDescriptor(MySqlConnector.class.getName(), Module.version());
     }
 
     @Override
     public Field.Set getConnectorFields() {
-        return MySqlConnectorConfig.ALL_FIELDS
-                .filtered(f -> f != MySqlConnectorConfig.GTID_NEW_CHANNEL_POSITION);
+        return MySqlConnectorConfig.ALL_FIELDS;
     }
 }

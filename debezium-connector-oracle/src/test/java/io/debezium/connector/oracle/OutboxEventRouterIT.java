@@ -43,7 +43,7 @@ public class OutboxEventRouterIT extends AbstractEventRouterTest<OracleConnector
 
         setConsumeTimeout(TestHelper.defaultMessageConsumerPollTimeout(), TimeUnit.SECONDS);
         initializeConnectorTestFramework();
-        Testing.Files.delete(TestHelper.DB_HISTORY_PATH);
+        Testing.Files.delete(TestHelper.SCHEMA_HISTORY_PATH);
 
         super.beforeEach();
     }
@@ -70,7 +70,7 @@ public class OutboxEventRouterIT extends AbstractEventRouterTest<OracleConnector
 
     @Override
     protected Configuration.Builder getConfigurationBuilder(boolean initialSnapshot) {
-        final SnapshotMode snapshotMode = initialSnapshot ? SnapshotMode.INITIAL : SnapshotMode.SCHEMA_ONLY;
+        final SnapshotMode snapshotMode = initialSnapshot ? SnapshotMode.INITIAL : SnapshotMode.NO_DATA;
         return TestHelper.defaultConfig()
                 .with(OracleConnectorConfig.SNAPSHOT_MODE, snapshotMode.getValue())
                 // this allows numeric(1) to be simulated as boolean types like other databases

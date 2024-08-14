@@ -7,6 +7,7 @@ package io.debezium.connector.oracle;
 
 import java.sql.SQLException;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 import org.apache.kafka.connect.source.SourceRecord;
@@ -14,21 +15,31 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.debezium.DebeziumException;
+import io.debezium.bean.StandardBeanNames;
+import io.debezium.config.CommonConnectorConfig;
 import io.debezium.config.Configuration;
 import io.debezium.config.Field;
 import io.debezium.connector.base.ChangeEventQueue;
 import io.debezium.connector.common.BaseSourceTask;
 import io.debezium.connector.oracle.StreamingAdapter.TableNameCaseSensitivity;
+import io.debezium.document.DocumentReader;
+import io.debezium.jdbc.DefaultMainConnectionProvidingConnectionFactory;
 import io.debezium.jdbc.JdbcConfiguration;
+import io.debezium.jdbc.MainConnectionProvidingConnectionFactory;
 import io.debezium.pipeline.ChangeEventSourceCoordinator;
 import io.debezium.pipeline.DataChangeEvent;
 import io.debezium.pipeline.ErrorHandler;
 import io.debezium.pipeline.EventDispatcher;
+import io.debezium.pipeline.notification.NotificationService;
+import io.debezium.pipeline.signal.SignalProcessor;
 import io.debezium.pipeline.spi.Offsets;
 import io.debezium.relational.TableId;
-import io.debezium.schema.TopicSelector;
+import io.debezium.schema.SchemaFactory;
+import io.debezium.schema.SchemaNameAdjuster;
+import io.debezium.snapshot.SnapshotterService;
+import io.debezium.spi.topic.TopicNamingStrategy;
 import io.debezium.util.Clock;
-import io.debezium.util.SchemaNameAdjuster;
+import io.debezium.util.Strings;
 
 public class OracleConnectorTask extends BaseSourceTask<OraclePartition, OracleOffsetContext> {
 
@@ -38,6 +49,7 @@ public class OracleConnectorTask extends BaseSourceTask<OraclePartition, OracleO
     private volatile OracleTaskContext taskContext;
     private volatile ChangeEventQueue<DataChangeEvent> queue;
     private volatile OracleConnection jdbcConnection;
+    private volatile OracleConnection beanRegistryJdbcConnection;
     private volatile ErrorHandler errorHandler;
     private volatile OracleDatabaseSchema schema;
 
@@ -49,29 +61,54 @@ public class OracleConnectorTask extends BaseSourceTask<OraclePartition, OracleO
     @Override
     public ChangeEventSourceCoordinator<OraclePartition, OracleOffsetContext> start(Configuration config) {
         OracleConnectorConfig connectorConfig = new OracleConnectorConfig(config);
-        TopicSelector<TableId> topicSelector = OracleTopicSelector.defaultSelector(connectorConfig);
-        SchemaNameAdjuster schemaNameAdjuster = connectorConfig.schemaNameAdjustmentMode().createAdjuster();
+        TopicNamingStrategy<TableId> topicNamingStrategy = connectorConfig.getTopicNamingStrategy(CommonConnectorConfig.TOPIC_NAMING_STRATEGY);
+        SchemaNameAdjuster schemaNameAdjuster = connectorConfig.schemaNameAdjuster();
 
         JdbcConfiguration jdbcConfig = connectorConfig.getJdbcConfig();
-        jdbcConnection = new OracleConnection(jdbcConfig, () -> getClass().getClassLoader());
+        MainConnectionProvidingConnectionFactory<OracleConnection> connectionFactory = new DefaultMainConnectionProvidingConnectionFactory<>(
+                () -> new OracleConnection(jdbcConfig));
+        jdbcConnection = connectionFactory.mainConnection();
 
-        validateRedoLogConfiguration();
-
-        OracleValueConverters valueConverters = new OracleValueConverters(connectorConfig, jdbcConnection);
+        OracleValueConverters valueConverters = connectorConfig.getAdapter().getValueConverter(connectorConfig, jdbcConnection);
         OracleDefaultValueConverter defaultValueConverter = new OracleDefaultValueConverter(valueConverters, jdbcConnection);
         TableNameCaseSensitivity tableNameCaseSensitivity = connectorConfig.getAdapter().getTableNameCaseSensitivity(jdbcConnection);
         this.schema = new OracleDatabaseSchema(connectorConfig, valueConverters, defaultValueConverter, schemaNameAdjuster,
-                topicSelector, tableNameCaseSensitivity);
+                topicNamingStrategy, tableNameCaseSensitivity);
 
         Offsets<OraclePartition, OracleOffsetContext> previousOffsets = getPreviousOffsets(new OraclePartition.Provider(connectorConfig),
                 connectorConfig.getAdapter().getOffsetContextLoader());
 
-        OraclePartition partition = previousOffsets.getTheOnlyPartition();
+        // Manual Bean Registration
+        beanRegistryJdbcConnection = connectionFactory.newConnection();
+        connectorConfig.getBeanRegistry().add(StandardBeanNames.CONFIGURATION, config);
+        connectorConfig.getBeanRegistry().add(StandardBeanNames.CONNECTOR_CONFIG, connectorConfig);
+        connectorConfig.getBeanRegistry().add(StandardBeanNames.DATABASE_SCHEMA, schema);
+        connectorConfig.getBeanRegistry().add(StandardBeanNames.JDBC_CONNECTION, beanRegistryJdbcConnection);
+        connectorConfig.getBeanRegistry().add(StandardBeanNames.VALUE_CONVERTER, valueConverters);
+        connectorConfig.getBeanRegistry().add(StandardBeanNames.OFFSETS, previousOffsets);
+
+        // Service providers
+        registerServiceProviders(connectorConfig.getServiceRegistry());
+
+        final SnapshotterService snapshotterService = connectorConfig.getServiceRegistry().tryGetService(SnapshotterService.class);
+
+        validateRedoLogConfiguration(connectorConfig, snapshotterService);
+
+        checkArchiveLogDestination(jdbcConnection, connectorConfig.getArchiveLogDestinationName());
+
         OracleOffsetContext previousOffset = previousOffsets.getTheOnlyOffset();
 
-        validateAndLoadDatabaseHistory(connectorConfig, partition, previousOffset, schema);
+        validateAndLoadSchemaHistory(connectorConfig, jdbcConnection::validateLogPosition, previousOffsets, schema, snapshotterService.getSnapshotter());
 
         taskContext = new OracleTaskContext(connectorConfig, schema);
+
+        // If the redo log position is not available it is necessary to re-execute snapshot
+        if (previousOffset == null) {
+            LOGGER.info("No previous offset found");
+        }
+        else {
+            LOGGER.info("Found previous offset {}", previousOffset);
+        }
 
         Clock clock = Clock.system();
 
@@ -80,39 +117,89 @@ public class OracleConnectorTask extends BaseSourceTask<OraclePartition, OracleO
                 .pollInterval(connectorConfig.getPollInterval())
                 .maxBatchSize(connectorConfig.getMaxBatchSize())
                 .maxQueueSize(connectorConfig.getMaxQueueSize())
+                .maxQueueSizeInBytes(connectorConfig.getMaxQueueSizeInBytes())
                 .loggingContextSupplier(() -> taskContext.configureLoggingContext(CONTEXT_NAME))
                 .build();
 
-        errorHandler = new OracleErrorHandler(connectorConfig, queue);
+        errorHandler = new OracleErrorHandler(connectorConfig, queue, errorHandler);
 
         final OracleEventMetadataProvider metadataProvider = new OracleEventMetadataProvider();
 
+        SignalProcessor<OraclePartition, OracleOffsetContext> signalProcessor = new SignalProcessor<>(
+                OracleConnector.class, connectorConfig, Map.of(),
+                getAvailableSignalChannels(),
+                DocumentReader.defaultReader(),
+                previousOffsets);
+
         EventDispatcher<OraclePartition, TableId> dispatcher = new EventDispatcher<>(
                 connectorConfig,
-                topicSelector,
+                topicNamingStrategy,
                 schema,
                 queue,
                 connectorConfig.getTableFilters().dataCollectionFilter(),
                 DataChangeEvent::new,
                 metadataProvider,
-                schemaNameAdjuster);
+                connectorConfig.createHeartbeat(
+                        topicNamingStrategy,
+                        schemaNameAdjuster,
+                        () -> getHeartbeatConnection(connectorConfig, jdbcConfig),
+                        exception -> {
+                            final String sqlErrorId = exception.getMessage();
+                            throw new DebeziumException("Could not execute heartbeat action query (Error: " + sqlErrorId + ")", exception);
+                        }),
+                schemaNameAdjuster,
+                signalProcessor);
 
-        final OracleStreamingChangeEventSourceMetrics streamingMetrics = new OracleStreamingChangeEventSourceMetrics(taskContext, queue, metadataProvider,
-                connectorConfig);
+        final AbstractOracleStreamingChangeEventSourceMetrics streamingMetrics = connectorConfig.getAdapter()
+                .getStreamingMetrics(taskContext, queue, metadataProvider, connectorConfig);
+
+        NotificationService<OraclePartition, OracleOffsetContext> notificationService = new NotificationService<>(getNotificationChannels(),
+                connectorConfig, SchemaFactory.get(), dispatcher::enqueueNotification);
 
         ChangeEventSourceCoordinator<OraclePartition, OracleOffsetContext> coordinator = new ChangeEventSourceCoordinator<>(
                 previousOffsets,
                 errorHandler,
                 OracleConnector.class,
                 connectorConfig,
-                new OracleChangeEventSourceFactory(connectorConfig, jdbcConnection, errorHandler, dispatcher, clock, schema, jdbcConfig, taskContext, streamingMetrics),
+                new OracleChangeEventSourceFactory(connectorConfig, connectionFactory, errorHandler, dispatcher, clock, schema, jdbcConfig, taskContext,
+                        streamingMetrics, snapshotterService),
                 new OracleChangeEventSourceMetricsFactory(streamingMetrics),
                 dispatcher,
-                schema);
+                schema, signalProcessor,
+                notificationService, snapshotterService);
 
         coordinator.start(taskContext, this.queue, metadataProvider);
 
         return coordinator;
+    }
+
+    private void checkArchiveLogDestination(OracleConnection connection, String destinationName) {
+        try {
+
+            if (!Strings.isNullOrBlank(destinationName)) {
+                if (!connection.isArchiveLogDestinationValid(destinationName)) {
+                    LOGGER.warn("Archive log destination '{}' may not be valid, please check the database.", destinationName);
+                }
+            }
+            else {
+                if (!connection.isOnlyOneArchiveLogDestinationValid()) {
+                    LOGGER.warn("There are multiple valid archive log destinations. " +
+                            "Please add '{}' to the connector configuration to avoid log availability problems.",
+                            OracleConnectorConfig.ARCHIVE_DESTINATION_NAME.name());
+                }
+            }
+        }
+        catch (SQLException e) {
+            throw new DebeziumException("Error while checking validity of archive log configuration", e);
+        }
+    }
+
+    private OracleConnection getHeartbeatConnection(OracleConnectorConfig connectorConfig, JdbcConfiguration jdbcConfig) {
+        final OracleConnection connection = new OracleConnection(jdbcConfig);
+        if (!Strings.isNullOrBlank(connectorConfig.getPdbName())) {
+            connection.setSessionToPdb(connectorConfig.getPdbName());
+        }
+        return connection;
     }
 
     @Override
@@ -137,6 +224,15 @@ public class OracleConnectorTask extends BaseSourceTask<OraclePartition, OracleO
             LOGGER.error("Exception while closing JDBC connection", e);
         }
 
+        try {
+            if (beanRegistryJdbcConnection != null) {
+                beanRegistryJdbcConnection.close();
+            }
+        }
+        catch (SQLException e) {
+            LOGGER.error("Exception while closing JDBC bean registry connection", e);
+        }
+
         if (schema != null) {
             schema.close();
         }
@@ -147,41 +243,25 @@ public class OracleConnectorTask extends BaseSourceTask<OraclePartition, OracleO
         return OracleConnectorConfig.ALL_FIELDS;
     }
 
-    private void validateRedoLogConfiguration() {
+    private void validateRedoLogConfiguration(OracleConnectorConfig config, SnapshotterService snapshotterService) {
         // Check whether the archive log is enabled.
         final boolean archivelogMode = jdbcConnection.isArchiveLogMode();
         if (!archivelogMode) {
-            throw new DebeziumException("The Oracle server is not configured to use a archive log LOG_MODE, which is "
-                    + "required for this connector to work properly. Change the Oracle configuration to use a "
-                    + "LOG_MODE=ARCHIVELOG and restart the connector.");
+            if (redoLogRequired(config, snapshotterService)) {
+                throw new DebeziumException("The Oracle server is not configured to use a archive log LOG_MODE, which is "
+                        + "required for this connector to work properly. Change the Oracle configuration to use a "
+                        + "LOG_MODE=ARCHIVELOG and restart the connector.");
+            }
+            else {
+                LOGGER.warn("Failed the archive log check but continuing as redo log isn't strictly required");
+            }
         }
     }
 
-    private void validateAndLoadDatabaseHistory(OracleConnectorConfig config, OraclePartition partition, OracleOffsetContext offset, OracleDatabaseSchema schema) {
-        if (offset == null) {
-            if (config.getSnapshotMode().shouldSnapshotOnSchemaError()) {
-                // We are in schema only recovery mode, use the existing redo log position
-                // would like to also verify redo log position exists, but it defaults to 0 which is technically valid
-                throw new DebeziumException("Could not find existing redo log information while attempting schema only recovery snapshot");
-            }
-            LOGGER.info("Connector started for the first time, database history recovery will not be executed");
-            schema.initializeStorage();
-            return;
-        }
-        if (!schema.historyExists()) {
-            LOGGER.warn("Database history was not found but was expected");
-            if (config.getSnapshotMode().shouldSnapshotOnSchemaError()) {
-                LOGGER.info("The db-history topic is missing but we are in {} snapshot mode. " +
-                        "Attempting to snapshot the current schema and then begin reading the redo log from the last recorded offset.",
-                        OracleConnectorConfig.SnapshotMode.SCHEMA_ONLY_RECOVERY);
-            }
-            else {
-                throw new DebeziumException("The db history topic is missing. You may attempt to recover it by reconfiguring the connector to "
-                        + OracleConnectorConfig.SnapshotMode.SCHEMA_ONLY_RECOVERY);
-            }
-            schema.initializeStorage();
-            return;
-        }
-        schema.recover(Offsets.of(partition, offset));
+    private static boolean redoLogRequired(OracleConnectorConfig config, SnapshotterService snapshotterService) {
+        // Check whether our connector configuration relies on the redo log and should fail fast if it isn't configured
+        return snapshotterService.getSnapshotter().shouldStream() ||
+                config.getLogMiningTransactionSnapshotBoundaryMode() == OracleConnectorConfig.TransactionSnapshotBoundaryMode.ALL;
     }
+
 }

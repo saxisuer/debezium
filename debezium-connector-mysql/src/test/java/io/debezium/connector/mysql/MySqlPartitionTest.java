@@ -5,17 +5,16 @@
  */
 package io.debezium.connector.mysql;
 
-import io.debezium.connector.common.AbstractPartitionTest;
+import io.debezium.connector.binlog.BinlogPartitionTest;
 
-public class MySqlPartitionTest extends AbstractPartitionTest<MySqlPartition> {
-
+public class MySqlPartitionTest extends BinlogPartitionTest<MySqlPartition> {
     @Override
     protected MySqlPartition createPartition1() {
-        return new MySqlPartition("server1");
+        return new MySqlPartition("server1", "database1");
     }
 
     @Override
     protected MySqlPartition createPartition2() {
-        return new MySqlPartition("server2");
+        return new MySqlPartition("server2", "database1");
     }
 }

@@ -9,21 +9,29 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import io.debezium.pipeline.signal.actions.snapshotting.AdditionalCondition;
 import io.debezium.relational.Table;
 
 public interface IncrementalSnapshotContext<T> {
 
-    T currentDataCollectionId();
+    DataCollection<T> currentDataCollectionId();
 
-    T nextDataCollection();
+    DataCollection<T> nextDataCollection();
 
-    List<T> addDataCollectionNamesToSnapshot(List<String> dataCollectionIds);
+    List<DataCollection<T>> addDataCollectionNamesToSnapshot(String correlationId, List<String> dataCollectionIds, List<AdditionalCondition> additionalCondition,
+                                                             String surrogateKey);
 
     int dataCollectionsToBeSnapshottedCount();
 
     boolean openWindow(String id);
 
     boolean closeWindow(String id);
+
+    void pauseSnapshot();
+
+    void resumeSnapshot();
+
+    boolean isSnapshotPaused();
 
     boolean isNonInitialChunk();
 
@@ -56,4 +64,15 @@ public interface IncrementalSnapshotContext<T> {
     boolean isSchemaVerificationPassed();
 
     void setSchemaVerificationPassed(boolean schemaVerificationPassed);
+
+    void stopSnapshot();
+
+    boolean removeDataCollectionFromSnapshot(String dataCollectionId);
+
+    List<DataCollection<T>> getDataCollections();
+
+    void unsetCorrelationId();
+
+    String getCorrelationId();
+
 }

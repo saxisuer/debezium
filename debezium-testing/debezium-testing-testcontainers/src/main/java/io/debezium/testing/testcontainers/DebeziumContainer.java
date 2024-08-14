@@ -5,28 +5,37 @@
  */
 package io.debezium.testing.testcontainers;
 
-import static java.time.temporal.ChronoUnit.SECONDS;
-
 import java.io.IOException;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+
+import javax.management.InstanceNotFoundException;
+import javax.management.JMException;
+import javax.management.MBeanServerConnection;
+import javax.management.MalformedObjectNameException;
+import javax.management.ObjectName;
+import javax.management.remote.JMXConnector;
+import javax.management.remote.JMXConnectorFactory;
+import javax.management.remote.JMXServiceURL;
 
 import org.awaitility.Awaitility;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.KafkaContainer;
 import org.testcontainers.containers.Network;
 import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.containers.wait.strategy.LogMessageWaitStrategy;
+import org.testcontainers.containers.wait.strategy.HttpWaitStrategy;
 import org.testcontainers.utility.DockerImageName;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
-import io.debezium.util.ContainerImageVersions;
+import io.debezium.testing.testcontainers.util.ContainerImageVersions;
 
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
@@ -40,9 +49,12 @@ import okhttp3.ResponseBody;
  */
 public class DebeziumContainer extends GenericContainer<DebeziumContainer> {
 
-    private static final String DEBEZIUM_VERSION = ContainerImageVersions.getStableVersion("debezium/connect");
+    private static final String DEBEZIUM_CONTAINER = "quay.io/debezium/connect";
+    private static final String DEBEZIUM_NIGHTLY_TAG = "nightly";
 
     private static final int KAFKA_CONNECT_PORT = 8083;
+    private static final Integer DEFAULT_JMX_PORT = 13333;
+    private static final Duration DEBEZIUM_CONTAINER_STARTUP_TIMEOUT = Duration.ofSeconds(waitTimeForRecords() * 30);
     private static final String TEST_PROPERTY_PREFIX = "debezium.test.";
     public static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
     protected static final ObjectMapper MAPPER = new ObjectMapper();
@@ -53,20 +65,40 @@ public class DebeziumContainer extends GenericContainer<DebeziumContainer> {
         defaultConfig();
     }
 
+    public DebeziumContainer(final Future<String> image) {
+        super(image);
+        defaultConfig();
+    }
+
     public DebeziumContainer(final String containerImageName) {
         super(DockerImageName.parse(containerImageName));
         defaultConfig();
     }
 
     public static DebeziumContainer latestStable() {
-        return new DebeziumContainer("debezium/connect:" + DEBEZIUM_VERSION);
+
+        return new DebeziumContainer(String.format("%s:%s", DEBEZIUM_CONTAINER, lazilyRetrieveAndCacheLatestStable()));
+    }
+
+    private static String debeziumLatestStable;
+
+    private static String lazilyRetrieveAndCacheLatestStable() {
+        if (debeziumLatestStable == null) {
+            debeziumLatestStable = ContainerImageVersions.getStableVersion("quay.io/debezium/connect");
+        }
+        return debeziumLatestStable;
+    }
+
+    public static DebeziumContainer nightly() {
+        return new DebeziumContainer(String.format("%s:%s", DEBEZIUM_CONTAINER, DEBEZIUM_NIGHTLY_TAG));
     }
 
     private void defaultConfig() {
         setWaitStrategy(
-                new LogMessageWaitStrategy()
-                        .withRegEx(".*Session key updated.*")
-                        .withStartupTimeout(Duration.of(60, SECONDS)));
+                new HttpWaitStrategy()
+                        .forPath("/connectors")
+                        .forPort(KAFKA_CONNECT_PORT)
+                        .withStartupTimeout(DEBEZIUM_CONTAINER_STARTUP_TIMEOUT));
         withEnv("GROUP_ID", "1");
         withEnv("CONFIG_STORAGE_TOPIC", "debezium_connect_config");
         withEnv("OFFSET_STORAGE_TOPIC", "debezium_connect_offsets");
@@ -92,12 +124,25 @@ public class DebeziumContainer extends GenericContainer<DebeziumContainer> {
         return self();
     }
 
+    public DebeziumContainer enableJMX() {
+        return enableJMX(DEFAULT_JMX_PORT);
+    }
+
+    public DebeziumContainer enableJMX(Integer jmxPort) {
+        withEnv("JMXHOST", "localhost")
+                .withEnv("JMXPORT", String.valueOf(jmxPort))
+                .withEnv("JMXAUTH", "false")
+                .withEnv("JMXSSL", "false");
+        addFixedExposedPort(jmxPort, jmxPort);
+        return self();
+    }
+
     public static int waitTimeForRecords() {
         return Integer.parseInt(System.getProperty(TEST_PROPERTY_PREFIX + "records.waittime", "2"));
     }
 
     public String getTarget() {
-        return "http://" + getContainerIpAddress() + ":" + getMappedPort(KAFKA_CONNECT_PORT);
+        return "http://" + getHost() + ":" + getMappedPort(KAFKA_CONNECT_PORT);
     }
 
     /**
@@ -166,7 +211,7 @@ public class DebeziumContainer extends GenericContainer<DebeziumContainer> {
 
     private static void handleFailedResponse(Response response) {
         String responseBodyContent = "{empty response body}";
-        try (final ResponseBody responseBody = response.body()) {
+        try (ResponseBody responseBody = response.body()) {
             if (null != responseBody) {
                 responseBodyContent = responseBody.string();
             }
@@ -181,13 +226,13 @@ public class DebeziumContainer extends GenericContainer<DebeziumContainer> {
         final RequestBody body = RequestBody.create(payload, JSON);
         final Request request = new Request.Builder().url(fullUrl).post(body).build();
 
-        try (final Response response = CLIENT.newCall(request).execute()) {
+        try (Response response = CLIENT.newCall(request).execute()) {
             if (!response.isSuccessful()) {
                 handleFailedResponse(response);
             }
         }
         catch (IOException e) {
-            throw new RuntimeException("Error connecting to Debezium container", e);
+            throw new RuntimeException("Error connecting to Debezium container on URL: " + fullUrl, e);
         }
     }
 
@@ -195,7 +240,7 @@ public class DebeziumContainer extends GenericContainer<DebeziumContainer> {
         final RequestBody body = RequestBody.create(payload, JSON);
         final Request request = new Request.Builder().url(fullUrl).put(body).build();
 
-        try (final Response response = CLIENT.newCall(request).execute()) {
+        try (Response response = CLIENT.newCall(request).execute()) {
             if (!response.isSuccessful()) {
                 handleFailedResponse(response);
             }
@@ -224,7 +269,7 @@ public class DebeziumContainer extends GenericContainer<DebeziumContainer> {
 
     public boolean connectorIsNotRegistered(String connectorName) {
         final Request request = new Request.Builder().url(getConnectorUri(connectorName)).build();
-        try (final Response response = executeGETRequest(request)) {
+        try (Response response = executeGETRequest(request)) {
             return response.code() == 404;
         }
     }
@@ -244,7 +289,7 @@ public class DebeziumContainer extends GenericContainer<DebeziumContainer> {
 
     public List<String> getRegisteredConnectors() {
         final Request request = new Request.Builder().url(getConnectorsUri()).build();
-        try (final ResponseBody responseBody = executeGETRequestSuccessfully(request).body()) {
+        try (ResponseBody responseBody = executeGETRequestSuccessfully(request).body()) {
             if (null != responseBody) {
                 return MAPPER.readValue(responseBody.string(), new TypeReference<List<String>>() {
                 });
@@ -258,7 +303,7 @@ public class DebeziumContainer extends GenericContainer<DebeziumContainer> {
 
     public boolean isConnectorConfigured(String connectorName) {
         final Request request = new Request.Builder().url(getConnectorUri(connectorName)).build();
-        try (final Response response = executeGETRequest(request)) {
+        try (Response response = executeGETRequest(request)) {
             return response.isSuccessful();
         }
     }
@@ -283,7 +328,7 @@ public class DebeziumContainer extends GenericContainer<DebeziumContainer> {
 
     public Connector.State getConnectorState(String connectorName) {
         final Request request = new Request.Builder().url(getConnectorStatusUri(connectorName)).build();
-        try (final ResponseBody responseBody = executeGETRequestSuccessfully(request).body()) {
+        try (ResponseBody responseBody = executeGETRequestSuccessfully(request).body()) {
             if (null != responseBody) {
                 final ObjectNode parsedObject = (ObjectNode) MAPPER.readTree(responseBody.string());
                 return Connector.State.valueOf(parsedObject.get("connector").get("state").asText());
@@ -297,10 +342,15 @@ public class DebeziumContainer extends GenericContainer<DebeziumContainer> {
 
     public Connector.State getConnectorTaskState(String connectorName, int taskNumber) {
         final Request request = new Request.Builder().url(getConnectorStatusUri(connectorName)).get().build();
-        try (final ResponseBody responseBody = executeGETRequestSuccessfully(request).body()) {
+        try (ResponseBody responseBody = executeGETRequestSuccessfully(request).body()) {
             if (null != responseBody) {
                 final ObjectNode parsedObject = (ObjectNode) MAPPER.readTree(responseBody.string());
-                return Connector.State.valueOf(parsedObject.get("tasks").get(taskNumber).get("state").asText());
+                final JsonNode tasksNode = parsedObject.get("tasks").get(taskNumber);
+                // Task array can return null if the array is empty or the task number is not within bounds
+                if (tasksNode == null) {
+                    return null;
+                }
+                return Connector.State.valueOf(tasksNode.get("state").asText());
             }
             return null;
         }
@@ -313,7 +363,7 @@ public class DebeziumContainer extends GenericContainer<DebeziumContainer> {
     public String getConnectorConfigProperty(String connectorName, String configPropertyName) {
         final Request request = new Request.Builder().url(getConnectorConfigUri(connectorName)).get().build();
 
-        try (final ResponseBody responseBody = executeGETRequestSuccessfully(request).body()) {
+        try (ResponseBody responseBody = executeGETRequestSuccessfully(request).body()) {
             if (null != responseBody) {
                 final ObjectNode parsedObject = (ObjectNode) MAPPER.readTree(responseBody.string());
                 return parsedObject.get(configPropertyName).asText();
@@ -367,9 +417,48 @@ public class DebeziumContainer extends GenericContainer<DebeziumContainer> {
                 .until(() -> Objects.equals(expectedValue, getConnectorConfigProperty(connectorName, propertyName)));
     }
 
+    public void waitForStreamingRunning(String connectorTypeId, String server) throws InterruptedException {
+        waitForStreamingRunning(connectorTypeId, server, "streaming");
+    }
+
+    public void waitForStreamingRunning(String connectorTypeId, String server, String contextName) {
+        waitForStreamingRunning(connectorTypeId, server, contextName, null);
+    }
+
+    public void waitForStreamingRunning(String connectorTypeId, String server, String contextName, String task) {
+        Awaitility.await()
+                .atMost(120, TimeUnit.SECONDS)
+                .ignoreException(InstanceNotFoundException.class)
+                .until(() -> isStreamingRunning(connectorTypeId, server, contextName, task));
+    }
+
+    public boolean isStreamingRunning(String connectorTypeId, String server, String contextName, String task) throws JMException {
+        MBeanServerConnection mBeanServerConnection;
+        try {
+            JMXServiceURL url = new JMXServiceURL("service:jmx:rmi:///jndi/rmi://localhost:" + DEFAULT_JMX_PORT + "/jmxrmi");
+            try (JMXConnector connectorJmx = JMXConnectorFactory.connect(url, null)) {
+                mBeanServerConnection = connectorJmx.getMBeanServerConnection();
+                ObjectName streamingMetricsObjectName = task != null ? getStreamingMetricsObjectName(connectorTypeId, server, contextName, task)
+                        : getStreamingMetricsObjectName(connectorTypeId, server, contextName);
+                return (boolean) mBeanServerConnection.getAttribute(streamingMetricsObjectName, "Connected");
+            }
+        }
+        catch (IOException e) {
+            throw new RuntimeException("Unable to connect to JMX service", e);
+        }
+    }
+
+    private static ObjectName getStreamingMetricsObjectName(String connector, String server, String context) throws MalformedObjectNameException {
+        return new ObjectName("debezium." + connector + ":type=connector-metrics,context=" + context + ",server=" + server);
+    }
+
+    private static ObjectName getStreamingMetricsObjectName(String connector, String server, String context, String task) throws MalformedObjectNameException {
+        return new ObjectName("debezium." + connector + ":type=connector-metrics,context=" + context + ",server=" + server + ",task=" + task);
+    }
+
     public static ConnectorConfiguration getPostgresConnectorConfiguration(PostgreSQLContainer<?> postgresContainer, int id, String... options) {
         final ConnectorConfiguration config = ConnectorConfiguration.forJdbcContainer(postgresContainer)
-                .with("database.server.name", "dbserver" + id)
+                .with("topic.prefix", "dbserver" + id)
                 .with("slot.name", "debezium_" + id);
 
         if (options != null && options.length > 0) {

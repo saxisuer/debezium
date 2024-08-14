@@ -16,12 +16,11 @@ public class MongoDbConnectorMetadata implements ConnectorMetadata {
 
     @Override
     public ConnectorDescriptor getConnectorDescriptor() {
-        return new ConnectorDescriptor("mongodb", "Debezium MongoDB Connector", MongoDbConnector.class.getName(), Module.version());
+        return new ConnectorDescriptor(MongoDbConnector.class.getName(), Module.version());
     }
 
     @Override
     public Field.Set getConnectorFields() {
-        return MongoDbConnectorConfig.ALL_FIELDS
-                .filtered(f -> f != MongoDbConnectorConfig.POLL_INTERVAL_SEC && f != MongoDbConnectorConfig.MAX_COPY_THREADS);
+        return MongoDbConnectorConfig.ALL_FIELDS;
     }
 }

@@ -5,6 +5,7 @@
  */
 package io.debezium.connector.oracle;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.assertEquals;
 
 import java.nio.ByteBuffer;
@@ -14,13 +15,16 @@ import java.util.concurrent.TimeUnit;
 
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.source.SourceRecord;
-import org.fest.assertions.Assertions;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TestRule;
 
 import io.debezium.config.CommonConnectorConfig.BinaryHandlingMode;
 import io.debezium.config.Configuration;
+import io.debezium.connector.oracle.junit.SkipTestDependingOnStrategyRule;
+import io.debezium.connector.oracle.junit.SkipWhenLogMiningStrategyIs;
 import io.debezium.connector.oracle.util.TestHelper;
 import io.debezium.embedded.AbstractConnectorTest;
 import io.debezium.util.Testing;
@@ -28,7 +32,11 @@ import io.debezium.util.Testing;
 /**
  * @author Chris Cranford
  */
+@SkipWhenLogMiningStrategyIs(value = SkipWhenLogMiningStrategyIs.Strategy.HYBRID, reason = "Hybrid does not support BLOB")
 public class OracleBinaryModeIT extends AbstractConnectorTest {
+
+    @Rule
+    public final TestRule skipStrategyRule = new SkipTestDependingOnStrategyRule();
 
     private OracleConnection connection;
 
@@ -43,7 +51,7 @@ public class OracleBinaryModeIT extends AbstractConnectorTest {
 
         setConsumeTimeout(TestHelper.defaultMessageConsumerPollTimeout(), TimeUnit.SECONDS);
         initializeConnectorTestFramework();
-        Testing.Files.delete(TestHelper.DB_HISTORY_PATH);
+        Testing.Files.delete(TestHelper.SCHEMA_HISTORY_PATH);
     }
 
     @After
@@ -79,6 +87,14 @@ public class OracleBinaryModeIT extends AbstractConnectorTest {
         assertEquals(expectedValue, data.get("BLOB_COL"));
     }
 
+    @Test
+    public void shouldReceiveBase64UrlSafeBinary() throws InterruptedException {
+        Struct data = consume(BinaryHandlingMode.BASE64_URL_SAFE);
+
+        String expectedValue = "AQID";
+        assertEquals(expectedValue, data.get("BLOB_COL"));
+    }
+
     private Struct consume(BinaryHandlingMode binaryMode) throws InterruptedException {
         final Configuration config = TestHelper.defaultConfig()
                 .with(OracleConnectorConfig.SNAPSHOT_MODE, OracleConnectorConfig.SnapshotMode.INITIAL)
@@ -93,7 +109,7 @@ public class OracleBinaryModeIT extends AbstractConnectorTest {
 
         SourceRecords records = consumeRecordsByTopic(1);
         final List<SourceRecord> results = records.recordsForTopic("server1.DEBEZIUM.BINARY_MODE_TEST");
-        Assertions.assertThat(results).hasSize(1);
+        assertThat(results).hasSize(1);
 
         return (Struct) ((Struct) results.get(0).value()).get("after");
     }

@@ -7,7 +7,7 @@ package io.debezium.connector.oracle;
 
 import java.time.Instant;
 import java.util.Collections;
-import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -20,16 +20,31 @@ public class SourceInfo extends BaseSourceInfo {
 
     public static final String TXID_KEY = "txId";
     public static final String SCN_KEY = "scn";
+    public static final String EVENT_SCN_KEY = "scn";
     public static final String COMMIT_SCN_KEY = "commit_scn";
     public static final String LCR_POSITION_KEY = "lcr_position";
     public static final String SNAPSHOT_KEY = "snapshot";
+    public static final String USERNAME_KEY = "user_name";
+    public static final String SCN_INDEX_KEY = "scn_idx";
+    public static final String REDO_SQL = "redo_sql";
+    public static final String ROW_ID = "row_id";
+
+    // Tracks thread-specific values when using multiple threads during snapshot
+    private final ThreadLocal<String> rowId = new ThreadLocal<>();
 
     private Scn scn;
-    private Scn commitScn;
+    private CommitScn commitScn;
+    private Scn eventScn;
     private String lcrPosition;
     private String transactionId;
+    private String userName;
     private Instant sourceTime;
     private Set<TableId> tableIds;
+    private Integer redoThread;
+    private String rsId;
+    private long ssn;
+    private Long scnIndex;
+    private String redoSql;
 
     protected SourceInfo(OracleConnectorConfig connectorConfig) {
         super(connectorConfig);
@@ -39,16 +54,24 @@ public class SourceInfo extends BaseSourceInfo {
         return scn;
     }
 
-    public Scn getCommitScn() {
+    public CommitScn getCommitScn() {
         return commitScn;
+    }
+
+    public Scn getEventScn() {
+        return eventScn;
     }
 
     public void setScn(Scn scn) {
         this.scn = scn;
     }
 
-    public void setCommitScn(Scn commitScn) {
+    public void setCommitScn(CommitScn commitScn) {
         this.commitScn = commitScn;
+    }
+
+    public void setEventScn(Scn eventScn) {
+        this.eventScn = eventScn;
     }
 
     public String getLcrPosition() {
@@ -67,6 +90,30 @@ public class SourceInfo extends BaseSourceInfo {
         this.transactionId = transactionId;
     }
 
+    public String getUserName() {
+        return userName;
+    }
+
+    public void setUserName(String userName) {
+        this.userName = userName;
+    }
+
+    public String getRsId() {
+        return rsId;
+    }
+
+    public void setRsId(String rsId) {
+        this.rsId = rsId;
+    }
+
+    public long getSsn() {
+        return ssn;
+    }
+
+    public void setSsn(long ssn) {
+        this.ssn = ssn;
+    }
+
     public Instant getSourceTime() {
         return sourceTime;
     }
@@ -75,8 +122,24 @@ public class SourceInfo extends BaseSourceInfo {
         this.sourceTime = sourceTime;
     }
 
+    public String getRedoSql() {
+        return redoSql;
+    }
+
+    public void setRedoSql(String redoSql) {
+        this.redoSql = redoSql;
+    }
+
+    public String getRowId() {
+        return rowId.get();
+    }
+
+    public void setRowId(String rowId) {
+        this.rowId.set(rowId);
+    }
+
     public String tableSchema() {
-        return tableIds.isEmpty() ? null
+        return (tableIds == null || tableIds.isEmpty()) ? null
                 : tableIds.stream()
                         .filter(x -> x != null)
                         .map(TableId::schema)
@@ -85,7 +148,7 @@ public class SourceInfo extends BaseSourceInfo {
     }
 
     public String table() {
-        return tableIds.isEmpty() ? null
+        return (tableIds == null || tableIds.isEmpty()) ? null
                 : tableIds.stream()
                         .filter(x -> x != null)
                         .map(TableId::table)
@@ -93,11 +156,27 @@ public class SourceInfo extends BaseSourceInfo {
     }
 
     public void tableEvent(Set<TableId> tableIds) {
-        this.tableIds = new HashSet<>(tableIds);
+        this.tableIds = new LinkedHashSet<>(tableIds);
     }
 
     public void tableEvent(TableId tableId) {
         this.tableIds = Collections.singleton(tableId);
+    }
+
+    public Integer getRedoThread() {
+        return redoThread;
+    }
+
+    public void setRedoThread(Integer redoThread) {
+        this.redoThread = redoThread;
+    }
+
+    public Long getScnIndex() {
+        return scnIndex;
+    }
+
+    public void setScnIndex(Long scnIndex) {
+        this.scnIndex = scnIndex;
     }
 
     @Override
@@ -107,6 +186,6 @@ public class SourceInfo extends BaseSourceInfo {
 
     @Override
     protected String database() {
-        return tableIds.iterator().next().catalog();
+        return (tableIds != null) ? tableIds.iterator().next().catalog() : null;
     }
 }

@@ -7,7 +7,7 @@ package io.debezium.connector.oracle;
 
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -15,9 +15,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.debezium.connector.oracle.antlr.OracleDdlParser;
-import io.debezium.connector.oracle.logminer.processor.TruncateReceiver;
+import io.debezium.connector.oracle.logminer.LogMinerAdapter;
 import io.debezium.pipeline.spi.SchemaChangeEventEmitter;
+import io.debezium.relational.Attribute;
 import io.debezium.relational.Table;
+import io.debezium.relational.TableEditor;
 import io.debezium.relational.TableId;
 import io.debezium.relational.Tables.TableFilter;
 import io.debezium.relational.ddl.DdlChanges;
@@ -25,8 +27,8 @@ import io.debezium.relational.ddl.DdlParserListener;
 import io.debezium.relational.ddl.DdlParserListener.TableAlteredEvent;
 import io.debezium.relational.ddl.DdlParserListener.TableCreatedEvent;
 import io.debezium.relational.ddl.DdlParserListener.TableDroppedEvent;
+import io.debezium.relational.ddl.DdlParserListener.TableTruncatedEvent;
 import io.debezium.schema.SchemaChangeEvent;
-import io.debezium.schema.SchemaChangeEvent.SchemaChangeEventType;
 import io.debezium.text.MultipleParsingExceptions;
 import io.debezium.text.ParsingException;
 
@@ -48,13 +50,26 @@ public class OracleSchemaChangeEventEmitter implements SchemaChangeEventEmitter 
     private final String objectOwner;
     private final String ddlText;
     private final TableFilter filters;
-    private final OracleStreamingChangeEventSourceMetrics streamingMetrics;
+    private final AbstractOracleStreamingChangeEventSourceMetrics streamingMetrics;
     private final TruncateReceiver truncateReceiver;
+    private final OracleConnectorConfig connectorConfig;
+    private final Long objectId;
+    private final Long dataObjectId;
 
     public OracleSchemaChangeEventEmitter(OracleConnectorConfig connectorConfig, OraclePartition partition,
                                           OracleOffsetContext offsetContext, TableId tableId, String sourceDatabaseName,
                                           String objectOwner, String ddlText, OracleDatabaseSchema schema,
-                                          Instant changeTime, OracleStreamingChangeEventSourceMetrics streamingMetrics,
+                                          Instant changeTime, AbstractOracleStreamingChangeEventSourceMetrics streamingMetrics,
+                                          TruncateReceiver truncateReceiver) {
+        this(connectorConfig, partition, offsetContext, tableId, sourceDatabaseName, objectOwner, null, null,
+                ddlText, schema, changeTime, streamingMetrics, truncateReceiver);
+    }
+
+    public OracleSchemaChangeEventEmitter(OracleConnectorConfig connectorConfig, OraclePartition partition,
+                                          OracleOffsetContext offsetContext, TableId tableId, String sourceDatabaseName,
+                                          String objectOwner, Long objectId, Long dataObjectId, String ddlText,
+                                          OracleDatabaseSchema schema, Instant changeTime,
+                                          AbstractOracleStreamingChangeEventSourceMetrics streamingMetrics,
                                           TruncateReceiver truncateReceiver) {
         this.partition = partition;
         this.offsetContext = offsetContext;
@@ -67,6 +82,10 @@ public class OracleSchemaChangeEventEmitter implements SchemaChangeEventEmitter 
         this.streamingMetrics = streamingMetrics;
         this.filters = connectorConfig.getTableFilters().dataCollectionFilter();
         this.truncateReceiver = truncateReceiver;
+        this.connectorConfig = connectorConfig;
+        // These are only provided by LogMiner
+        this.objectId = objectId;
+        this.dataObjectId = dataObjectId;
     }
 
     @Override
@@ -86,16 +105,16 @@ public class OracleSchemaChangeEventEmitter implements SchemaChangeEventEmitter 
         }
         catch (ParsingException | MultipleParsingExceptions e) {
             if (schema.skipUnparseableDdlStatements()) {
-                LOGGER.warn("Ignoring unparsable DDL statement '{}': {}", ddlText, e);
+                LOGGER.warn("Ignoring unparsable DDL statement '{}':", ddlText, e);
                 streamingMetrics.incrementWarningCount();
-                streamingMetrics.incrementUnparsableDdlCount();
+                streamingMetrics.incrementSchemaChangeParseErrorCount();
             }
             else {
                 throw e;
             }
         }
 
-        if (!ddlChanges.isEmpty() && filters.isIncluded(tableId)) {
+        if (!ddlChanges.isEmpty() && (filters.isIncluded(tableId) || !schema.storeOnlyCapturedTables())) {
             List<SchemaChangeEvent> changeEvents = new ArrayList<>();
             ddlChanges.getEventsByDatabase((String dbName, List<DdlParserListener.Event> events) -> {
                 events.forEach(event -> {
@@ -110,7 +129,7 @@ public class OracleSchemaChangeEventEmitter implements SchemaChangeEventEmitter 
                             changeEvents.add(dropTableEvent(partition, tableBefore, (TableDroppedEvent) event));
                             break;
                         case TRUNCATE_TABLE:
-                            truncateReceiver.processTruncateEvent();
+                            changeEvents.add(truncateTableEvent(partition, (TableTruncatedEvent) event));
                             break;
                         default:
                             LOGGER.info("Skipped DDL event type {}: {}", event.type(), ddlText);
@@ -120,54 +139,101 @@ public class OracleSchemaChangeEventEmitter implements SchemaChangeEventEmitter 
             });
 
             for (SchemaChangeEvent event : changeEvents) {
-                receiver.schemaChangeEvent(event);
+                if (!schema.skipSchemaChangeEvent(event)) {
+                    if (SchemaChangeEvent.SchemaChangeEventType.TRUNCATE == event.getType()) {
+                        truncateReceiver.processTruncateEvent();
+                    }
+                    else {
+                        receiver.schemaChangeEvent(event);
+                    }
+
+                }
             }
         }
     }
 
     private SchemaChangeEvent createTableEvent(OraclePartition partition, TableCreatedEvent event) {
+        applyTableObjectAttributes(tableId);
         offsetContext.tableEvent(tableId, changeTime);
-        return new SchemaChangeEvent(
-                partition.getSourcePartition(),
-                offsetContext.getOffset(),
-                offsetContext.getSourceInfo(),
+        return SchemaChangeEvent.ofCreate(
+                partition,
+                offsetContext,
                 tableId.catalog(),
                 tableId.schema(),
                 event.statement(),
                 schema.tableFor(event.tableId()),
-                SchemaChangeEventType.CREATE,
                 false);
     }
 
     private SchemaChangeEvent alterTableEvent(OraclePartition partition, TableAlteredEvent event) {
-        final Set<TableId> tableIds = new HashSet<>();
+        final Set<TableId> tableIds = new LinkedHashSet<>();
         tableIds.add(tableId);
         tableIds.add(event.tableId());
 
+        applyTableObjectAttributes(event.tableId());
         offsetContext.tableEvent(tableIds, changeTime);
-        return new SchemaChangeEvent(
-                partition.getSourcePartition(),
-                offsetContext.getOffset(),
-                offsetContext.getSourceInfo(),
-                tableId.catalog(),
-                tableId.schema(),
-                event.statement(),
-                schema.tableFor(event.tableId()),
-                SchemaChangeEventType.ALTER,
-                false);
+        if (tableId == null) {
+            return SchemaChangeEvent.ofAlter(
+                    partition,
+                    offsetContext,
+                    tableId.catalog(),
+                    tableId.schema(),
+                    event.statement(),
+                    schema.tableFor(event.tableId()));
+        }
+        else {
+            return SchemaChangeEvent.ofRename(
+                    partition,
+                    offsetContext,
+                    tableId.catalog(),
+                    tableId.schema(),
+                    event.statement(),
+                    schema.tableFor(event.tableId()),
+                    tableId);
+        }
     }
 
     private SchemaChangeEvent dropTableEvent(OraclePartition partition, Table tableSchemaBeforeDrop, TableDroppedEvent event) {
+        // intentionally no need to apply table attributes
         offsetContext.tableEvent(tableId, changeTime);
-        return new SchemaChangeEvent(
-                partition.getSourcePartition(),
-                offsetContext.getOffset(),
-                offsetContext.getSourceInfo(),
+        return SchemaChangeEvent.ofDrop(
+                partition,
+                offsetContext,
                 tableId.catalog(),
                 tableId.schema(),
                 event.statement(),
-                tableSchemaBeforeDrop,
-                SchemaChangeEventType.DROP,
-                false);
+                tableSchemaBeforeDrop);
     }
+
+    private SchemaChangeEvent truncateTableEvent(OraclePartition partition, TableTruncatedEvent event) {
+        applyTableObjectAttributes(event.tableId());
+        offsetContext.tableEvent(tableId, changeTime);
+        return SchemaChangeEvent.ofTruncate(
+                partition,
+                offsetContext,
+                tableId.catalog(),
+                tableId.schema(),
+                event.statement(),
+                schema.tableFor(event.tableId()));
+    }
+
+    void applyTableObjectAttributes(TableId tableId) {
+        if (connectorConfig.getAdapter() instanceof LogMinerAdapter) {
+            if (OracleConnectorConfig.LogMiningStrategy.HYBRID.equals(connectorConfig.getLogMiningStrategy())) {
+                // todo: centralize this with other attribute set locations
+                final Table table = schema.tableFor(tableId);
+                if (table != null) {
+                    // If the table has not yet been registered, there is nothing to apply
+                    final TableEditor editor = table.edit();
+                    editor.addAttribute(Attribute.editor().name("OBJECT_ID").value(objectId).create());
+                    editor.addAttribute(Attribute.editor().name("DATA_OBJECT_ID").value(dataObjectId).create());
+                    schema.getTables().overwriteTable(editor.create());
+                }
+                else {
+                    LOGGER.debug("Cannot apply table attributes to table '{}', schema is not yet registered.", tableId);
+                }
+            }
+        }
+    }
+
 }

@@ -188,7 +188,7 @@ As a data source, MySQL will be used in the following.
 Besides running a pod with MySQL, an appropriate service which will point to the pod with DB itself is needed.
 It can be created e.g. as follows:
 
-[source,bash]
+[source,subs="attributes",bash]
 ----
 $ cat << EOF | oc create -f -
 apiVersion: v1
@@ -352,10 +352,10 @@ spec:
     database.user: ${secrets:debezium-example/debezium-secret:username}
     database.password: ${secrets:debezium-example/debezium-secret:password}
     database.server.id: 184054
-    database.server.name: mysql
+    topic.prefix: mysql
     database.include.list: inventory
-    database.history.kafka.bootstrap.servers: debezium-cluster-kafka-bootstrap:9092
-    database.history.kafka.topic: schema-changes.inventory
+    schema.history.internal.kafka.bootstrap.servers: debezium-cluster-kafka-bootstrap:9092
+    schema.history.internal.kafka.topic: schema-changes.inventory
 EOF
 ----
 
@@ -375,7 +375,7 @@ Connect to the MySQL database:
 
 [source,subs="attributes",options="nowrap"]
 ----
-$ oc run -n debezium-example -it --rm --image=mysql:8.0 --restart=Never --env MYSQL_ROOT_PASSWORD=debezium mysqlterm -- mysql -hmysql -P3306 -uroot -pdebezium
+$ oc run -n debezium-example -it --rm --image=mysql:8.2 --restart=Never --env MYSQL_ROOT_PASSWORD=debezium mysqlterm -- mysql -hmysql -P3306 -uroot -pdebezium
 ----
 
 Do some changes in the `customers` table:
@@ -409,6 +409,8 @@ You now should be able to observe the change events on the Kafka topic:
       "connector": "mysql",
       "name": "mysql",
       "ts_ms": 1646300467000,
+      "ts_us": 1646300467000000,
+      "ts_ns": 1646300467000000000,
       "snapshot": "false",
       "db": "inventory",
       "sequence": null,
@@ -423,6 +425,8 @@ You now should be able to observe the change events on the Kafka topic:
     },
     "op": "u",
     "ts_ms": 1646300467746,
+    "ts_us": 1646300467746178,
+    "ts_ns": 1646300467746178963,
     "transaction": null
   }
 }

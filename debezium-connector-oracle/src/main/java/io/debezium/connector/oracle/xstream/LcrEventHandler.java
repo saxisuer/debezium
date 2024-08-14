@@ -16,12 +16,12 @@ import org.slf4j.LoggerFactory;
 
 import io.debezium.DebeziumException;
 import io.debezium.connector.oracle.OracleConnection;
+import io.debezium.connector.oracle.OracleConnection.NonRelationalTableException;
 import io.debezium.connector.oracle.OracleConnectorConfig;
 import io.debezium.connector.oracle.OracleDatabaseSchema;
 import io.debezium.connector.oracle.OracleOffsetContext;
 import io.debezium.connector.oracle.OraclePartition;
 import io.debezium.connector.oracle.OracleSchemaChangeEventEmitter;
-import io.debezium.connector.oracle.OracleStreamingChangeEventSourceMetrics;
 import io.debezium.connector.oracle.OracleValueConverters;
 import io.debezium.connector.oracle.xstream.XstreamStreamingChangeEventSource.PositionAndScn;
 import io.debezium.pipeline.ErrorHandler;
@@ -30,8 +30,8 @@ import io.debezium.relational.Column;
 import io.debezium.relational.Table;
 import io.debezium.relational.TableId;
 import io.debezium.util.Clock;
+import io.debezium.util.Strings;
 
-import oracle.jdbc.OracleTypes;
 import oracle.streams.ChunkColumnValue;
 import oracle.streams.DDLLCR;
 import oracle.streams.DefaultRowLCR;
@@ -59,15 +59,15 @@ class LcrEventHandler implements XStreamLCRCallbackHandler {
     private final OracleOffsetContext offsetContext;
     private final boolean tablenameCaseInsensitive;
     private final XstreamStreamingChangeEventSource eventSource;
-    private final OracleStreamingChangeEventSourceMetrics streamingMetrics;
+    private final XStreamStreamingChangeEventSourceMetrics streamingMetrics;
     private final Map<String, ChunkColumnValues> columnChunks;
     private RowLCR currentRow;
 
-    public LcrEventHandler(OracleConnectorConfig connectorConfig, ErrorHandler errorHandler,
-                           EventDispatcher<OraclePartition, TableId> dispatcher, Clock clock,
-                           OracleDatabaseSchema schema, OraclePartition partition, OracleOffsetContext offsetContext,
-                           boolean tablenameCaseInsensitive, XstreamStreamingChangeEventSource eventSource,
-                           OracleStreamingChangeEventSourceMetrics streamingMetrics) {
+    LcrEventHandler(OracleConnectorConfig connectorConfig, ErrorHandler errorHandler,
+                    EventDispatcher<OraclePartition, TableId> dispatcher, Clock clock,
+                    OracleDatabaseSchema schema, OraclePartition partition, OracleOffsetContext offsetContext,
+                    boolean tablenameCaseInsensitive, XstreamStreamingChangeEventSource eventSource,
+                    XStreamStreamingChangeEventSourceMetrics streamingMetrics) {
         this.connectorConfig = connectorConfig;
         this.errorHandler = errorHandler;
         this.dispatcher = dispatcher;
@@ -105,7 +105,9 @@ class LcrEventHandler implements XStreamLCRCallbackHandler {
                 return;
             }
 
+            offsetContext.setRowId(""); // specifically reset on each event
             offsetContext.setScn(lcrPosition.getScn());
+            offsetContext.setEventScn(lcrPosition.getScn());
             offsetContext.setLcrPosition(lcrPosition.toString());
             offsetContext.setTransactionId(lcr.getTransactionId());
             offsetContext.tableEvent(new TableId(lcr.getSourceDatabaseName(), lcr.getObjectOwner(), lcr.getObjectName()),
@@ -149,10 +151,11 @@ class LcrEventHandler implements XStreamLCRCallbackHandler {
     }
 
     private void dispatchDataChangeEvent(RowLCR lcr, Map<String, Object> chunkValues) throws InterruptedException {
-        LOGGER.debug("Processing DML event {}", lcr);
+        LOGGER.info("Processing DML event {}", lcr);
 
         if (RowLCR.COMMIT.equals(lcr.getCommandType())) {
-            dispatcher.dispatchTransactionCommittedEvent(partition, offsetContext);
+            final Instant commitTimestamp = lcr.getSourceTime().timestampValue().toInstant();
+            dispatcher.dispatchTransactionCommittedEvent(partition, offsetContext, commitTimestamp);
             return;
         }
 
@@ -164,9 +167,22 @@ class LcrEventHandler implements XStreamLCRCallbackHandler {
                 LOGGER.trace("Table {} is new but excluded, schema change skipped.", tableId);
                 return;
             }
-            LOGGER.info("Table {} is new and will be captured.", tableId);
+
+            LOGGER.warn("Obtaining schema for table {}, which should be already loaded, this may signal potential bug in fetching table schemas.", tableId);
+            final String tableDdl;
+            try {
+                tableDdl = getTableMetadataDdl(tableId);
+            }
+            catch (NonRelationalTableException e) {
+                LOGGER.warn("Table {} is not a relational table and will be skipped.", tableId);
+                streamingMetrics.incrementWarningCount();
+                return;
+            }
+
+            LOGGER.info("Table {} will be captured.", tableId);
             dispatcher.dispatchSchemaChangeEvent(
                     partition,
+                    offsetContext,
                     tableId,
                     new OracleSchemaChangeEventEmitter(
                             connectorConfig,
@@ -175,13 +191,16 @@ class LcrEventHandler implements XStreamLCRCallbackHandler {
                             tableId,
                             tableId.catalog(),
                             tableId.schema(),
-                            getTableMetadataDdl(tableId),
+                            tableDdl,
                             schema,
                             Instant.now(),
                             streamingMetrics,
                             null));
 
             table = schema.tableFor(tableId);
+            if (table == null) {
+                return;
+            }
         }
 
         // Xstream does not provide any before state for LOB columns and so this map will be
@@ -203,26 +222,34 @@ class LcrEventHandler implements XStreamLCRCallbackHandler {
         // is not explicitly provided in the map is initialized with the unavailable value
         // marker object so its transformed correctly by the value converters.
 
-        // todo: would be useful in the future to track some type of "has-lob" flag on the table
-        // such a flag would allow us to conditionalize this loop and only apply it to tables
-        // which have LOB columns.
-        for (Column column : table.columns()) {
-            if (isLobColumn(column)) {
-                // again Xstream doesn't supply before state for LOB values; explicitly use unavailable value
-                oldChunkValues.put(column.name(), OracleValueConverters.UNAVAILABLE_VALUE);
-                if (!chunkValues.containsKey(column.name())) {
-                    // Column not supplied, initialize with unavailable value marker
-                    LOGGER.trace("\tColumn '{}' not supplied, initialized with unavailable value", column.name());
-                    chunkValues.put(column.name(), OracleValueConverters.UNAVAILABLE_VALUE);
-                }
+        for (Column column : schema.getLobColumnsForTable(table.id())) {
+            // again Xstream doesn't supply before state for LOB values; explicitly use unavailable value
+            oldChunkValues.put(column.name(), OracleValueConverters.UNAVAILABLE_VALUE);
+            if (!chunkValues.containsKey(column.name())) {
+                // Column not supplied, initialize with unavailable value marker
+                LOGGER.trace("\tColumn '{}' not supplied, initialized with unavailable value", column.name());
+                chunkValues.put(column.name(), OracleValueConverters.UNAVAILABLE_VALUE);
             }
+        }
+
+        final Object rowIdObject = lcr.getAttribute("ROW_ID");
+        if (rowIdObject != null) {
+            offsetContext.setRowId(rowIdObject.toString());
         }
 
         dispatcher.dispatchDataChangeEvent(
                 partition,
                 tableId,
-                new XStreamChangeRecordEmitter(partition, offsetContext, lcr, oldChunkValues, chunkValues,
-                        schema.tableFor(tableId), clock));
+                new XStreamChangeRecordEmitter(
+                        connectorConfig,
+                        partition,
+                        offsetContext,
+                        lcr,
+                        oldChunkValues,
+                        chunkValues,
+                        schema.tableFor(tableId),
+                        schema,
+                        clock));
     }
 
     private void dispatchSchemaChangeEvent(DDLLCR ddlLcr) throws InterruptedException {
@@ -234,6 +261,7 @@ class LcrEventHandler implements XStreamLCRCallbackHandler {
 
         dispatcher.dispatchSchemaChangeEvent(
                 partition,
+                offsetContext,
                 tableId,
                 new OracleSchemaChangeEventEmitter(
                         connectorConfig,
@@ -278,12 +306,13 @@ class LcrEventHandler implements XStreamLCRCallbackHandler {
         }
     }
 
-    private String getTableMetadataDdl(TableId tableId) {
+    private String getTableMetadataDdl(TableId tableId) throws NonRelationalTableException {
+        LOGGER.info("Getting database metadata for table '{}'", tableId);
         final String pdbName = connectorConfig.getPdbName();
         // A separate connection must be used for this out-of-bands query while processing the Xstream callback.
         // This should have negligible overhead as this should happen rarely.
-        try (OracleConnection connection = new OracleConnection(connectorConfig.getJdbcConfig(), () -> getClass().getClassLoader())) {
-            if (pdbName != null) {
+        try (OracleConnection connection = new OracleConnection(connectorConfig.getJdbcConfig(), false)) {
+            if (!Strings.isNullOrBlank(pdbName)) {
                 connection.setSessionToPdb(pdbName);
             }
             connection.setAutoCommit(false);
@@ -349,10 +378,6 @@ class LcrEventHandler implements XStreamLCRCallbackHandler {
         throw new UnsupportedOperationException("Should never be called");
     }
 
-    private boolean isLobColumn(Column column) {
-        return column.jdbcType() == OracleTypes.CLOB || column.jdbcType() == OracleTypes.NCLOB || column.jdbcType() == OracleTypes.BLOB;
-    }
-
     private void resolveAndDispatchCurrentChunkedRow() {
         try {
             // Map of resolved chunk values
@@ -375,6 +400,11 @@ class LcrEventHandler implements XStreamLCRCallbackHandler {
                         resolvedChunkValues.put(columnName, chunkValues.getStringValue());
                         break;
 
+                    case ChunkColumnValue.XMLTYPE:
+                        resolvedChunkValues.put(columnName, chunkValues.getXmlValue());
+                        break;
+
+                    case ChunkColumnValue.RAW:
                     case ChunkColumnValue.BLOB:
                         resolvedChunkValues.put(columnName, chunkValues.getByteArray());
                         break;
